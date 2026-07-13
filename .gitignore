@@ -1,0 +1,17 @@
+# 憑證（絕對不能上傳）
+.env
+*.env
+
+# 執行期狀態（由 GitHub Actions cache 管理）
+seen_products.json
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.claude/

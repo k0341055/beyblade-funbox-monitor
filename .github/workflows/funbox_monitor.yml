@@ -1,0 +1,78 @@
+name: Funbox 商品 Monitor
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-funbox-${{ runner.os }}
+
+      - name: Install Python dependencies
+        run: pip install -r funbox_monitor/requirements.txt
+
+      - name: Get Playwright version
+        id: pw-version
+        run: echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install chromium --with-deps
+
+      - name: Install Playwright system deps only (cache hit)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
+
+      - name: Restore seen products state
+        uses: actions/cache@v4
+        with:
+          path: funbox_monitor/seen_products.json
+          key: funbox-seen-${{ github.run_id }}
+          restore-keys: |
+            funbox-seen-
+
+      - name: Run Funbox monitor (18 rounds)
+        env:
+          GMAIL_SENDER:     ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD:   ${{ secrets.GMAIL_PASSWORD }}
+          GMAIL_RECIPIENTS: ${{ secrets.GMAIL_RECIPIENTS }}
+          CHECK_ROUNDS:     '18'
+          STATE_FILE:       'seen_products.json'
+        working-directory: funbox_monitor
+        run: python funbox_monitor.py
+
+      - name: Upload debug screenshots (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: funbox-debug-${{ github.run_id }}
+          path: /tmp/funbox_debug_*.png
+          if-no-files-found: ignore
+          retention-days: 3

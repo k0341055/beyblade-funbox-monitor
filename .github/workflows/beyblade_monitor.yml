@@ -1,0 +1,82 @@
+name: Beyblade X New Product Monitor
+
+on:
+  schedule:
+    # 每 5 分鐘執行一次（GitHub Actions 最短間隔）
+    # 每次 workflow 內部跑 3 輪，每輪間隔 55~90 秒 → 實質每 ~2 分鐘偵測一次
+    - cron: '*/5 * * * *'
+  workflow_dispatch:   # 允許手動觸發（方便測試）
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10   # 正常執行 ~5~7 分鐘，留緩衝（首次 browser 安裝最多 +2 分鐘）
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-beyblade-${{ runner.os }}
+
+      - name: Install Python dependencies
+        run: pip install -r beyblade_monitor/requirements.txt
+
+      - name: Get Playwright version
+        id: pw-version
+        run: echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install chromium --with-deps
+
+      - name: Install Playwright system deps only (cache hit)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
+
+      # ── 跨 workflow 執行之狀態：seen_products.json ────────────────────────
+      # restore-keys 確保永遠能讀到最新的已見商品清單
+      - name: Restore seen products state
+        uses: actions/cache@v4
+        with:
+          path: beyblade_monitor/seen_products.json
+          key: beyblade-seen-${{ github.run_id }}
+          restore-keys: |
+            beyblade-seen-
+
+      - name: Run Beyblade X monitor (4 rounds)
+        env:
+          GMAIL_SENDER:     ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD:   ${{ secrets.GMAIL_PASSWORD }}
+          GMAIL_RECIPIENTS: ${{ secrets.GMAIL_RECIPIENTS }}
+          CHECK_ROUNDS:     '12'
+          STATE_FILE:       'seen_products.json'
+        working-directory: beyblade_monitor
+        run: python beyblade_monitor.py
+
+      - name: Upload debug screenshots (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: beyblade-debug-${{ github.run_id }}
+          path: /tmp/beyblade_debug_*.png
+          if-no-files-found: ignore
+          retention-days: 3
