@@ -34,9 +34,7 @@ GMAIL_SENDER = os.environ["GMAIL_SENDER"]
 GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
 GMAIL_RECIPIENTS = [
     addr.strip()
-    for addr in os.environ.get(
-        "GMAIL_RECIPIENTS", "kevin850703@gmail.com,u0342059@gmail.com"
-    ).split(",")
+    for addr in os.environ["GMAIL_RECIPIENTS"].split(",")
     if addr.strip()
 ]
 

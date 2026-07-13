@@ -42,8 +42,8 @@
                                │ 有新商品 / 冷卻到期
                   ┌────────────▼───────────┐
                   │     Gmail SMTP SSL     │
-                  │  → kevin850703@gmail   │
-                  │  → u0342059@gmail      │
+                  │  → GMAIL_RECIPIENTS    │
+                  │    (GitHub Secret)     │
                   └────────────────────────┘
 ```
 
