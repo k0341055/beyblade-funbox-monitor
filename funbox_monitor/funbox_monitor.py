@@ -100,12 +100,6 @@ async def fetch_products(page) -> list:
         await page.wait_for_selector(".collection_products .product", timeout=20_000)
     except PlaywrightTimeoutError:
         log.warning("找不到商品卡，頁面可能尚未渲染或結構已變更")
-        screenshot_path = f"/tmp/funbox_debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-        try:
-            await page.screenshot(path=screenshot_path, full_page=True)
-            log.info(f"Debug 截圖已存：{screenshot_path}")
-        except Exception:
-            pass
         return []
 
     # 商品資料都在 a.productClick 的 data-* 屬性中

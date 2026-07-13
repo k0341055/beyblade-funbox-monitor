@@ -68,11 +68,3 @@ jobs:
         working-directory: beyblade_monitor
         run: python beyblade_monitor.py
 
-      - name: Upload debug screenshots (if any)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: beyblade-debug-${{ github.run_id }}
-          path: /tmp/beyblade_debug_*.png
-          if-no-files-found: ignore
-          retention-days: 3

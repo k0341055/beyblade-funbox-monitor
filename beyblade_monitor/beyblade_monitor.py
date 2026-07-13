@@ -149,12 +149,6 @@ async def fetch_products(page) -> list[dict]:
         await page.wait_for_selector("div.c-card__info", timeout=10_000)
     except PlaywrightTimeoutError:
         log.warning("找不到商品卡，可能遭 Cloudflare 封鎖或頁面結構已變更")
-        screenshot_path = f"/tmp/beyblade_debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-        try:
-            await page.screenshot(path=screenshot_path, full_page=True)
-            log.info(f"Debug 截圖已存：{screenshot_path}")
-        except Exception:
-            pass
         return []
 
     cards = await page.query_selector_all("div.c-card__info")

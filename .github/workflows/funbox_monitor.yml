@@ -66,11 +66,3 @@ jobs:
         working-directory: funbox_monitor
         run: python funbox_monitor.py
 
-      - name: Upload debug screenshots (if any)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: funbox-debug-${{ github.run_id }}
-          path: /tmp/funbox_debug_*.png
-          if-no-files-found: ignore
-          retention-days: 3
