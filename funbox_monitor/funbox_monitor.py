@@ -91,20 +91,21 @@ def save_notified(notified: dict):
 async def fetch_products(page) -> list:
     log.info(f"正在載入頁面：{SEARCH_URL}")
     try:
-        await page.goto(SEARCH_URL, wait_until="networkidle", timeout=30_000)
+        await page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=20_000)
     except PlaywrightTimeoutError:
-        log.warning("networkidle 逾時，嘗試繼續解析頁面...")
+        log.warning("頁面載入逾時，跳過本輪")
+        return []
 
-    # SPA 渲染需要額外時間，等商品卡實際出現
+    # 等商品容器出現（缺貨時容器仍存在，只是內部沒有 .product）
     try:
-        await page.wait_for_selector(".collection_products .product", timeout=20_000)
+        await page.wait_for_selector(".collection_products", timeout=12_000)
     except PlaywrightTimeoutError:
-        log.warning("找不到商品卡，頁面可能尚未渲染或結構已變更")
+        log.warning("找不到商品容器，頁面結構可能已變更或遭封鎖")
         return []
 
     # 商品資料都在 a.productClick 的 data-* 屬性中
     links = await page.query_selector_all(".collection_products .product a.productClick")
-    log.info(f"找到 {len(links)} 個商品")
+    log.info(f"找到 {len(links)} 個商品（0 = 目前缺貨）")
 
     products = []
     for link_el in links:
@@ -185,8 +186,8 @@ async def check_once() -> bool:
             products = await fetch_products(page)
 
             if not products:
-                log.warning("未擷取到任何商品，跳過本輪")
-                return False
+                log.info("目前無商品（缺貨中），繼續監控")
+                return True
 
             now = datetime.now()
             cutoff = now - NOTIFY_COOLDOWN
