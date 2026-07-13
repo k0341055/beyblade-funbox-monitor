@@ -69,10 +69,10 @@ beyblade-funbox-monitor/
 
 ## 兩個監控器比較
 
-| | Beyblade X | Funbox |
+| | 日本網站 | Funbox |
 |---|---|---|
 | 目標網站 | `1999.co.jp` | `shop.funbox.com.tw` |
-| 偵測商品 | Beyblade X 系列 | TOMICA 小汽車 / 戰鬥陀螺 |
+| 偵測商品 | Beyblade X 系列 | 戰鬥陀螺 |
 | 反爬蟲 | Cloudflare（需反偵測） | JS SPA 動態渲染 |
 | 瀏覽器技術 | Playwright + 隨機 UA/Viewport | Playwright + wait_for_selector |
 | 每次執行輪數 | 12 輪（間隔 5~8 秒） | 18 輪（間隔 5~8 秒） |
