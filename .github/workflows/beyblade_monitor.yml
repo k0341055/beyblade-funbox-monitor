@@ -1,11 +1,7 @@
 name: Beyblade X New Product Monitor
 
 on:
-  schedule:
-    # 每 5 分鐘執行一次（GitHub Actions 最短間隔）
-    # 每次 workflow 內部跑 3 輪，每輪間隔 55~90 秒 → 實質每 ~2 分鐘偵測一次
-    - cron: '*/5 * * * *'
-  workflow_dispatch:   # 允許手動觸發（方便測試）
+  workflow_dispatch:   # 由 cron-job.org 透過 GitHub API 觸發
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

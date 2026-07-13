@@ -1,9 +1,7 @@
 name: Funbox 商品 Monitor
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch:
+  workflow_dispatch:   # 由 cron-job.org 透過 GitHub API 觸發
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
