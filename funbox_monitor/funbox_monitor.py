@@ -1,9 +1,8 @@
 """
 shop.funbox.com.tw 商品偵測器
-商品為 JS 動態渲染，使用 Playwright。無 Cloudflare，無需反偵測。
+Cyberbiz /products.json API 直接回傳商品+庫存，無需 Playwright。
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -16,7 +15,6 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 load_dotenv()
 
@@ -24,7 +22,11 @@ load_dotenv()
 # 設定區
 # ─────────────────────────────────────────────
 
-SEARCH_URL = "https://shop.funbox.com.tw/collections/%E6%88%B0%E9%AC%A5%E9%99%80%E8%9E%BA"
+COLLECTION_URL = os.environ.get(
+    "SEARCH_URL",
+    "https://shop.funbox.com.tw/collections/%E6%88%B0%E9%AC%A5%E9%99%80%E8%9E%BA",
+)
+API_URL = f"{COLLECTION_URL}/products.json"
 BASE_URL = "https://shop.funbox.com.tw"
 
 CHECK_ROUNDS = int(os.environ.get("CHECK_ROUNDS", "1"))
@@ -43,6 +45,13 @@ GMAIL_RECIPIENTS = [
 # 工具函式
 # ─────────────────────────────────────────────
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()],
+)
+log = logging.getLogger(__name__)
+
 
 def _mask_email(email: str) -> str:
     if "@" not in email:
@@ -50,31 +59,6 @@ def _mask_email(email: str) -> str:
     local, domain = email.split("@", 1)
     return f"{local[0]}***@{domain}"
 
-
-def fetch_inventory(href: str) -> int:
-    """呼叫 Cyberbiz JSON API 取得即時庫存數量，失敗回傳 -1"""
-    try:
-        url = f"{BASE_URL}{href}.json"
-        resp = requests.get(url, timeout=8)
-        resp.raise_for_status()
-        variants = resp.json().get("variants", [])
-        if variants:
-            return int(variants[0].get("inventory_quantity", -1))
-    except Exception:
-        pass
-    return -1
-
-
-# ─────────────────────────────────────────────
-# Logger
-# ─────────────────────────────────────────────
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()],
-)
-log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
 # 狀態管理（1 小時冷卻）
@@ -99,50 +83,32 @@ def save_notified(notified: dict):
 
 
 # ─────────────────────────────────────────────
-# 擷取商品清單（Playwright，等待 JS 渲染）
+# 擷取商品清單（Cyberbiz collections API）
 # ─────────────────────────────────────────────
 
 
-async def fetch_products(page) -> list:
-    log.info(f"正在載入頁面：{SEARCH_URL}")
-    try:
-        await page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=20_000)
-    except PlaywrightTimeoutError:
-        log.warning("頁面載入逾時，跳過本輪")
-        return []
-
-    # 等商品容器出現（缺貨時容器仍存在，只是內部沒有 .product）
-    try:
-        await page.wait_for_selector(".collection_products", timeout=12_000)
-    except PlaywrightTimeoutError:
-        log.warning("找不到商品容器，頁面結構可能已變更或遭封鎖")
-        return []
-
-    # 商品資料都在 a.productClick 的 data-* 屬性中
-    links = await page.query_selector_all(".collection_products .product a.productClick")
-    log.info(f"找到 {len(links)} 個商品（0 = 目前缺貨）")
+def fetch_products() -> list:
+    resp = requests.get(API_URL, timeout=10)
+    resp.raise_for_status()
+    raw = resp.json()
 
     products = []
-    for link_el in links:
-        href = (await link_el.get_attribute("href")) or ""
-        name = (await link_el.get_attribute("data-name")) or "(未知商品)"
-        raw_price = (await link_el.get_attribute("data-price")) or ""
+    for item in raw:
+        variant = (item.get("variants") or [{}])[0]
+        inventory = int(variant.get("inventory_quantity", 0))
+        if inventory <= 0:
+            continue  # 缺貨，跳過
 
-        # data-price 為浮點數字串（如 "4100.0"），轉為整數後加 NT$
-        try:
-            price = f"NT${int(float(raw_price))}"
-        except (ValueError, TypeError):
-            price = raw_price
-
-        inventory = fetch_inventory(href)
+        href = item.get("url", "")
         products.append({
             "href": href,
             "url": f"{BASE_URL}{href}" if href.startswith("/") else href,
-            "title": name,
-            "price": price,
+            "title": item.get("title", "(未知商品)").strip(),
+            "price": f"NT${int(variant.get('price', 0))}",
             "inventory": inventory,
         })
 
+    log.info(f"API 回傳 {len(raw)} 件，有庫存 {len(products)} 件")
     return products
 
 
@@ -153,10 +119,10 @@ async def fetch_products(page) -> list:
 
 def notify_products(products: list) -> bool:
     count = len(products)
-    subject = f"【Funbox 商品通知】偵測到 {count} 件商品"
+    subject = f"【Funbox 有貨了！】偵測到 {count} 件商品"
 
     lines = [
-        f"Funbox 官網偵測到共 {count} 件商品",
+        f"Funbox 官網偵測到共 {count} 件有庫存商品",
         f"偵測時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
         "=" * 50,
@@ -165,15 +131,11 @@ def notify_products(products: list) -> bool:
         lines.append(f"\n【商品 {i}】")
         lines.append(f"商品名：{p['title']}")
         lines.append(f"價格：{p['price']}")
-        inv = p.get("inventory", -1)
-        lines.append(f"庫存：{inv} 件" if inv >= 0 else "庫存：無法取得")
+        lines.append(f"庫存：{p['inventory']} 件")
         lines.append(f"商品連結：{p['url']}")
         lines.append("-" * 40)
 
-    lines += [
-        "",
-        f"完整商品頁：{SEARCH_URL}",
-    ]
+    lines += ["", f"完整商品頁：{COLLECTION_URL}"]
     body = "\n".join(lines)
 
     try:
@@ -197,45 +159,43 @@ def notify_products(products: list) -> bool:
 # ─────────────────────────────────────────────
 
 
-async def check_once() -> bool:
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-        try:
-            products = await fetch_products(page)
+def check_once() -> bool:
+    try:
+        products = fetch_products()
 
-            if not products:
-                log.info("目前無商品（缺貨中），繼續監控")
-                return True
-
-            now = datetime.now()
-            cutoff = now - NOTIFY_COOLDOWN
-            notified = load_notified()
-
-            to_notify = [
-                p for p in products
-                if p["href"] not in notified
-                or datetime.fromisoformat(notified[p["href"]]) < cutoff
-            ]
-
-            if to_notify:
-                log.info(f"發送通知：{len(to_notify)} 件（共 {len(products)} 件，跳過 {len(products)-len(to_notify)} 件冷卻中）")
-                notify_products(to_notify)
-                for p in to_notify:
-                    notified[p["href"]] = now.isoformat()
-            else:
-                log.info(f"所有 {len(products)} 件商品均在 1 小時冷卻期內，不重複通知")
-
-            current_hrefs = {p["href"] for p in products}
-            notified = {h: t for h, t in notified.items() if h in current_hrefs}
-            save_notified(notified)
+        if not products:
+            log.info("目前無庫存商品，繼續監控")
             return True
 
-        except Exception as e:
-            log.error(f"執行例外：{e}", exc_info=True)
-            return False
-        finally:
-            await browser.close()
+        now = datetime.now()
+        cutoff = now - NOTIFY_COOLDOWN
+        notified = load_notified()
+
+        to_notify = [
+            p for p in products
+            if p["href"] not in notified
+            or datetime.fromisoformat(notified[p["href"]]) < cutoff
+        ]
+
+        if to_notify:
+            log.info(f"發送通知：{len(to_notify)} 件（共 {len(products)} 件，跳過 {len(products)-len(to_notify)} 件冷卻中）")
+            notify_products(to_notify)
+            for p in to_notify:
+                notified[p["href"]] = now.isoformat()
+        else:
+            log.info(f"所有 {len(products)} 件商品均在 1 小時冷卻期內")
+
+        current_hrefs = {p["href"] for p in products}
+        notified = {h: t for h, t in notified.items() if h in current_hrefs}
+        save_notified(notified)
+        return True
+
+    except requests.HTTPError as e:
+        log.error(f"HTTP 錯誤：{e}")
+        return False
+    except Exception as e:
+        log.error(f"執行例外：{e}", exc_info=True)
+        return False
 
 
 # ─────────────────────────────────────────────
@@ -243,18 +203,18 @@ async def check_once() -> bool:
 # ─────────────────────────────────────────────
 
 
-async def main():
+def main():
     log.info(f"Funbox 商品偵測器 | 輪數：{CHECK_ROUNDS}")
     for round_num in range(1, CHECK_ROUNDS + 1):
         if CHECK_ROUNDS > 1:
             log.info(f"── 第 {round_num}/{CHECK_ROUNDS} 輪 ──")
-        await check_once()
+        check_once()
         if round_num < CHECK_ROUNDS:
-            wait = random.randint(5, 8)
+            wait = random.randint(3, 5)
             log.info(f"等待 {wait} 秒後進行下一輪...")
-            await asyncio.sleep(wait)
+            time.sleep(wait)
     log.info("所有輪次完成")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

@@ -3,13 +3,10 @@ name: Funbox 商品 Monitor
 on:
   workflow_dispatch:   # 由 cron-job.org 透過 GitHub API 觸發
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 6
 
     steps:
       - name: Checkout code
@@ -29,25 +26,6 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r funbox_monitor/requirements.txt
 
-      - name: Get Playwright version
-        id: pw-version
-        run: echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> $GITHUB_OUTPUT
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
-
-      - name: Install Playwright browsers
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: playwright install chromium --with-deps
-
-      - name: Install Playwright system deps only (cache hit)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: playwright install-deps chromium
-
       - name: Restore seen products state
         uses: actions/cache@v4
         with:
@@ -56,13 +34,12 @@ jobs:
           restore-keys: |
             funbox-seen-
 
-      - name: Run Funbox monitor (12 rounds)
+      - name: Run Funbox monitor (50 rounds)
         env:
           GMAIL_SENDER:     ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD:   ${{ secrets.GMAIL_PASSWORD }}
           GMAIL_RECIPIENTS: ${{ secrets.GMAIL_RECIPIENTS }}
-          CHECK_ROUNDS:     '12'
+          CHECK_ROUNDS:     '50'
           STATE_FILE:       'seen_products.json'
         working-directory: funbox_monitor
         run: python funbox_monitor.py
-
