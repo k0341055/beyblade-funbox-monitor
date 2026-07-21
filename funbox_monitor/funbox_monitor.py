@@ -1,7 +1,7 @@
 """
 shop.funbox.com.tw 商品偵測器
-Cyberbiz /products.json API 直接回傳商品+庫存，無需 Playwright。
-偵測到非 APP 限定商品時，自動登入並完成結帳。
+Cyberbiz /products.json API 直接回傳商品+庫存，無需 Playwright（偵測階段）。
+偵測到非 APP 限定商品時，自動登入並完成結帳（Playwright 跑結帳流程）。
 """
 
 import json
@@ -83,22 +83,6 @@ def _extract_csrf(html: str) -> str:
     return ""
 
 
-def _hidden_fields(html: str) -> dict:
-    """Extract all hidden input field name/value pairs from an HTML page."""
-    fields = {}
-    for m in re.finditer(
-        r'<input[^>]+type=["\']hidden["\'][^>]*/?>',
-        html,
-        re.IGNORECASE,
-    ):
-        tag = m.group(0)
-        name_m = re.search(r'name=["\']([^"\']+)["\']', tag)
-        val_m = re.search(r'value=["\']([^"\']*)["\']', tag)
-        if name_m:
-            fields[name_m.group(1)] = val_m.group(1) if val_m else ""
-    return fields
-
-
 # ─────────────────────────────────────────────
 # 狀態管理（1 小時冷卻）
 # ─────────────────────────────────────────────
@@ -153,21 +137,25 @@ def fetch_products() -> list:
 
 
 # ─────────────────────────────────────────────
-# 自動購買（登入 → 加入購物車 → 結帳）
+# 自動購買（requests 登入+加購 → Playwright 結帳）
 # ─────────────────────────────────────────────
 
 
-def funbox_login() -> "requests.Session | None":
-    session = requests.Session()
-    session.headers.update({"User-Agent": _UA})
+def _requests_login_and_add(variant_id: int) -> tuple:
+    """
+    用 requests 完成登入 + 加入購物車。
+    回傳 (session, cart_url, cookies_list) 或 (None, None, None)。
+    """
+    sess = requests.Session()
+    sess.headers["User-Agent"] = _UA
     try:
-        resp = session.get(f"{BASE_URL}/account/login", timeout=10)
-        token = _extract_csrf(resp.text)
+        r = sess.get(f"{BASE_URL}/account/login", timeout=10)
+        token = _extract_csrf(r.text)
         if not token:
             log.error("登入頁面找不到 CSRF token")
-            return None
+            return None, None, None
 
-        resp = session.post(
+        r = sess.post(
             f"{BASE_URL}/account/login",
             data={
                 "customer[login]": FUNBOX_EMAIL,
@@ -177,100 +165,132 @@ def funbox_login() -> "requests.Session | None":
             allow_redirects=True,
             timeout=10,
         )
-        if "login" not in resp.url:
-            log.info(f"Funbox 登入成功 → {resp.url}")
-            return session
-        log.error(f"Funbox 登入失敗，仍停在 {resp.url}")
-        return None
-    except Exception as e:
-        log.error(f"登入例外：{e}")
-        return None
+        if "login" in r.url:
+            log.error(f"Funbox 登入失敗，仍停在 {r.url}")
+            return None, None, None
+        log.info(f"Funbox 登入成功 → {r.url}")
 
-
-def funbox_add_to_cart(session: "requests.Session", variant_id: int) -> bool:
-    try:
-        resp = session.post(
+        r = sess.post(
             f"{BASE_URL}/cart/add",
-            data={
-                "items[0][variant_id]": variant_id,
-                "items[0][quantity]": 1,
-            },
-            allow_redirects=True,
+            data={"id": variant_id, "quantity": 1},
+            headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
             timeout=10,
         )
-        if resp.status_code in (200, 302):
-            log.info(f"已加入購物車（variant_id={variant_id}）")
-            return True
-        log.error(f"加入購物車失敗，HTTP {resp.status_code}")
-        return False
+        if r.status_code not in (200, 409):
+            log.error(f"加入購物車失敗，HTTP {r.status_code}")
+            return None, None, None
+        log.info(f"已加入購物車（variant_id={variant_id}，HTTP {r.status_code}）")
+
+        r = sess.get(f"{BASE_URL}/cart", allow_redirects=True, timeout=10)
+        cart_url = r.url
+        cookies_list = [
+            {
+                "name": c.name,
+                "value": c.value,
+                "domain": c.domain or "shop.funbox.com.tw",
+                "path": c.path or "/",
+            }
+            for c in sess.cookies
+        ]
+        return sess, cart_url, cookies_list
+
     except Exception as e:
-        log.error(f"加入購物車例外：{e}")
-        return False
+        log.error(f"登入/加購例外：{e}")
+        return None, None, None
 
 
-def funbox_checkout(session: "requests.Session") -> str:
+def _playwright_checkout(cart_url: str, cookies_list: list) -> str:
     """
-    嘗試完成結帳。
-    回傳值："success" | "cart" | "failed"
-    "cart" = 商品已在購物車，但結帳流程未能自動完成，請手動結帳。
+    用 Playwright 完成結帳。
+    回傳值："success" | "3ds_pending" | "cart" | "failed"
     """
     try:
-        resp = session.get(f"{BASE_URL}/checkout", allow_redirects=True, timeout=15)
-        checkout_url = resp.url
-        log.info(f"結帳頁 URL：{checkout_url}")
-
-        def _is_complete(r: requests.Response) -> bool:
-            return any(k in r.url for k in ("thank", "complete", "order")) or "感謝" in r.text
-
-        if _is_complete(resp):
-            log.info("結帳已完成（第 0 步後確認）")
-            return "success"
-
-        # 嘗試最多 3 個結帳步驟
-        for step in range(1, 4):
-            token = _extract_csrf(resp.text)
-            if not token:
-                log.warning(f"結帳 step{step} 找不到 CSRF token，停止")
-                break
-
-            fields = _hidden_fields(resp.text)
-            fields["authenticity_token"] = token
-
-            resp = session.post(resp.url, data=fields, allow_redirects=True, timeout=15)
-            log.info(f"結帳 step{step} → {resp.url}, HTTP {resp.status_code}")
-
-            if _is_complete(resp):
-                log.info(f"結帳完成（step{step}）")
-                return "success"
-
-        log.warning(f"結帳流程未確認完成，最終停在 {resp.url}")
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        log.error("Playwright 未安裝，無法執行結帳")
         return "cart"
 
+    try:
+        with sync_playwright() as pw:
+            br = pw.chromium.launch(headless=True)
+            ctx = br.new_context(user_agent=_UA)
+            ctx.add_cookies(cookies_list)
+            page = ctx.new_page()
+
+            page.goto(cart_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(4000)
+            log.info(f"結帳頁 URL：{page.url}")
+
+            # 選擇信用卡付款
+            try:
+                page.locator("text=信用卡").first.click()
+                page.wait_for_timeout(800)
+            except Exception:
+                pass
+
+            # 選擇已存卡（下拉選第一個選項）
+            try:
+                sel = page.locator("select").all()
+                for s in sel:
+                    opts = s.evaluate("el => Array.from(el.options).map(o => o.text)")
+                    if opts:
+                        s.select_option(index=0)
+                        break
+            except Exception:
+                pass
+
+            # 勾選同意條款 checkbox
+            for cb in page.locator("input[type='checkbox']").all():
+                try:
+                    if cb.is_visible() and not cb.is_checked():
+                        cb.check()
+                        page.wait_for_timeout(200)
+                except Exception:
+                    pass
+
+            # 點擊立即結帳
+            page.locator("text=立即結帳").last.click()
+            log.info("已點擊「立即結帳」，等待跳轉...")
+
+            # 等待跳轉至銀行 3DS 或訂單確認
+            for _ in range(20):
+                page.wait_for_timeout(1500)
+                url = page.url
+                if any(k in url for k in ("order", "thank", "complete", "success")):
+                    log.info(f"結帳完成！URL={url}")
+                    br.close()
+                    return "success"
+                if any(k in url for k in ("acs.", "challenge", "3ds", "sinopac", "esunbank", "authentication")):
+                    log.info(f"3DS 驗證頁面：{url}")
+                    br.close()
+                    return "3ds_pending"
+
+            log.warning(f"結帳後最終 URL={page.url}，狀態未確認")
+            br.close()
+            return "cart"
+
     except Exception as e:
-        log.error(f"結帳例外：{e}")
+        log.error(f"Playwright 結帳例外：{e}")
         return "cart"
 
 
 def auto_buy(product: dict) -> str:
-    """登入 → 加入購物車 → 結帳。回傳 "success" | "cart" | "failed" | "skipped"。"""
+    """登入 → 加入購物車 → 結帳。回傳狀態字串。"""
     if not FUNBOX_EMAIL or not FUNBOX_PASSWORD_SITE:
         log.warning("未設定 FUNBOX_EMAIL / FUNBOX_PASSWORD，跳過自動購買")
         return "skipped"
 
     log.info(f"自動購買啟動：{product['title']}")
-    session = funbox_login()
-    if not session:
-        return "failed"
-
     variant_id = product.get("variant_id")
     if not variant_id:
-        log.error("找不到 variant_id，無法加入購物車")
+        log.error("找不到 variant_id")
         return "failed"
 
-    if not funbox_add_to_cart(session, variant_id):
+    _, cart_url, cookies_list = _requests_login_and_add(variant_id)
+    if not cart_url:
         return "failed"
 
-    return funbox_checkout(session)
+    return _playwright_checkout(cart_url, cookies_list)
 
 
 # ─────────────────────────────────────────────
@@ -278,11 +298,12 @@ def auto_buy(product: dict) -> str:
 # ─────────────────────────────────────────────
 
 _BUY_STATUS_LABEL = {
-    "success": "[已自動結帳完成]",
-    "cart":    "[已加入購物車，請手動完成結帳]",
-    "failed":  "[自動購買失敗，請手動下單]",
-    "skipped": "[未設定自動購買]",
-    "app_skip": "[APP 限定，已略過]",
+    "success":     "[已自動結帳完成]",
+    "3ds_pending": "[訂單已建立，請立即完成銀行 3DS 驗證（OTP 簡訊或 Wallet App）才能完成付款]",
+    "cart":        "[已加入購物車，請手動完成結帳]",
+    "failed":      "[自動購買失敗，請手動下單]",
+    "skipped":     "[未設定自動購買帳密]",
+    "app_skip":    "[APP 限定，已略過]",
 }
 
 
@@ -306,6 +327,14 @@ def notify_products(products: list, buy_results: dict = None) -> bool:
             label = _BUY_STATUS_LABEL.get(buy_results[p["href"]], buy_results[p["href"]])
             lines.append(f"購買狀態：{label}")
         lines.append("-" * 40)
+
+    if buy_results and "3ds_pending" in buy_results.values():
+        lines += [
+            "",
+            "⚠ 注意：有訂單需要 3DS 驗證",
+            f"請前往訂單頁確認：{BASE_URL}/account/orders",
+            "並完成銀行 OTP 簡訊或 Wallet App 驗證以完成付款。",
+        ]
 
     lines += ["", f"完整商品頁：{COLLECTION_URL}"]
     body = "\n".join(lines)

@@ -6,7 +6,7 @@ on:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 10
 
     steps:
       - name: Checkout code
@@ -25,6 +25,15 @@ jobs:
 
       - name: Install Python dependencies
         run: pip install -r funbox_monitor/requirements.txt
+
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('funbox_monitor/requirements.txt') }}
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install chromium --with-deps
 
       - name: Restore seen products state
         uses: actions/cache@v4
