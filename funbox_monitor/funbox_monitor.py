@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
 
+import requests
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -48,6 +49,20 @@ def _mask_email(email: str) -> str:
         return "***"
     local, domain = email.split("@", 1)
     return f"{local[0]}***@{domain}"
+
+
+def fetch_inventory(href: str) -> int:
+    """呼叫 Cyberbiz JSON API 取得即時庫存數量，失敗回傳 -1"""
+    try:
+        url = f"{BASE_URL}{href}.json"
+        resp = requests.get(url, timeout=8)
+        resp.raise_for_status()
+        variants = resp.json().get("variants", [])
+        if variants:
+            return int(variants[0].get("inventory_quantity", -1))
+    except Exception:
+        pass
+    return -1
 
 
 # ─────────────────────────────────────────────
@@ -119,11 +134,13 @@ async def fetch_products(page) -> list:
         except (ValueError, TypeError):
             price = raw_price
 
+        inventory = fetch_inventory(href)
         products.append({
             "href": href,
             "url": f"{BASE_URL}{href}" if href.startswith("/") else href,
             "title": name,
             "price": price,
+            "inventory": inventory,
         })
 
     return products
@@ -148,6 +165,8 @@ def notify_products(products: list) -> bool:
         lines.append(f"\n【商品 {i}】")
         lines.append(f"商品名：{p['title']}")
         lines.append(f"價格：{p['price']}")
+        inv = p.get("inventory", -1)
+        lines.append(f"庫存：{inv} 件" if inv >= 0 else "庫存：無法取得")
         lines.append(f"商品連結：{p['url']}")
         lines.append("-" * 40)
 
