@@ -39,6 +39,8 @@ jobs:
           GMAIL_SENDER:     ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD:   ${{ secrets.GMAIL_PASSWORD }}
           GMAIL_RECIPIENTS: ${{ secrets.GMAIL_RECIPIENTS }}
+          FUNBOX_EMAIL:     ${{ secrets.FUNBOX_EMAIL }}
+          FUNBOX_PASSWORD:  ${{ secrets.FUNBOX_PASSWORD }}
           CHECK_ROUNDS:     '50'
           STATE_FILE:       'seen_products.json'
         working-directory: funbox_monitor

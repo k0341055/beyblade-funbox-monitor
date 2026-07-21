@@ -1,12 +1,14 @@
 """
 shop.funbox.com.tw 商品偵測器
 Cyberbiz /products.json API 直接回傳商品+庫存，無需 Playwright。
+偵測到非 APP 限定商品時，自動登入並完成結帳。
 """
 
 import json
 import logging
 import os
 import random
+import re
 import smtplib
 import time
 from datetime import datetime, timedelta
@@ -41,6 +43,15 @@ GMAIL_RECIPIENTS = [
     if addr.strip()
 ]
 
+FUNBOX_EMAIL = os.environ.get("FUNBOX_EMAIL", "")
+FUNBOX_PASSWORD_SITE = os.environ.get("FUNBOX_PASSWORD", "")
+
+_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
 # ─────────────────────────────────────────────
 # 工具函式
 # ─────────────────────────────────────────────
@@ -58,6 +69,34 @@ def _mask_email(email: str) -> str:
         return "***"
     local, domain = email.split("@", 1)
     return f"{local[0]}***@{domain}"
+
+
+def _extract_csrf(html: str) -> str:
+    for pattern in [
+        r'name=["\']authenticity_token["\'][^>]*value=["\']([^"\']+)["\']',
+        r'value=["\']([^"\']+)["\'][^>]*name=["\']authenticity_token["\']',
+        r'<meta[^>]+name=["\']csrf-token["\'][^>]*content=["\']([^"\']+)["\']',
+    ]:
+        m = re.search(pattern, html)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _hidden_fields(html: str) -> dict:
+    """Extract all hidden input field name/value pairs from an HTML page."""
+    fields = {}
+    for m in re.finditer(
+        r'<input[^>]+type=["\']hidden["\'][^>]*/?>',
+        html,
+        re.IGNORECASE,
+    ):
+        tag = m.group(0)
+        name_m = re.search(r'name=["\']([^"\']+)["\']', tag)
+        val_m = re.search(r'value=["\']([^"\']*)["\']', tag)
+        if name_m:
+            fields[name_m.group(1)] = val_m.group(1) if val_m else ""
+    return fields
 
 
 # ─────────────────────────────────────────────
@@ -97,7 +136,7 @@ def fetch_products() -> list:
         variant = (item.get("variants") or [{}])[0]
         inventory = int(variant.get("inventory_quantity", 0))
         if inventory <= 0:
-            continue  # 缺貨，跳過
+            continue
 
         href = item.get("url", "")
         products.append({
@@ -106,6 +145,7 @@ def fetch_products() -> list:
             "title": item.get("title", "(未知商品)").strip(),
             "price": f"NT${int(variant.get('price', 0))}",
             "inventory": inventory,
+            "variant_id": variant.get("id"),
         })
 
     log.info(f"API 回傳 {len(raw)} 件，有庫存 {len(products)} 件")
@@ -113,11 +153,140 @@ def fetch_products() -> list:
 
 
 # ─────────────────────────────────────────────
-# Email 通知
+# 自動購買（登入 → 加入購物車 → 結帳）
 # ─────────────────────────────────────────────
 
 
-def notify_products(products: list) -> bool:
+def funbox_login() -> "requests.Session | None":
+    session = requests.Session()
+    session.headers.update({"User-Agent": _UA})
+    try:
+        resp = session.get(f"{BASE_URL}/account/login", timeout=10)
+        token = _extract_csrf(resp.text)
+        if not token:
+            log.error("登入頁面找不到 CSRF token")
+            return None
+
+        resp = session.post(
+            f"{BASE_URL}/account/login",
+            data={
+                "customer[login]": FUNBOX_EMAIL,
+                "customer[password]": FUNBOX_PASSWORD_SITE,
+                "authenticity_token": token,
+            },
+            allow_redirects=True,
+            timeout=10,
+        )
+        if "login" not in resp.url:
+            log.info(f"Funbox 登入成功 → {resp.url}")
+            return session
+        log.error(f"Funbox 登入失敗，仍停在 {resp.url}")
+        return None
+    except Exception as e:
+        log.error(f"登入例外：{e}")
+        return None
+
+
+def funbox_add_to_cart(session: "requests.Session", variant_id: int) -> bool:
+    try:
+        resp = session.post(
+            f"{BASE_URL}/cart/add",
+            data={
+                "items[0][variant_id]": variant_id,
+                "items[0][quantity]": 1,
+            },
+            allow_redirects=True,
+            timeout=10,
+        )
+        if resp.status_code in (200, 302):
+            log.info(f"已加入購物車（variant_id={variant_id}）")
+            return True
+        log.error(f"加入購物車失敗，HTTP {resp.status_code}")
+        return False
+    except Exception as e:
+        log.error(f"加入購物車例外：{e}")
+        return False
+
+
+def funbox_checkout(session: "requests.Session") -> str:
+    """
+    嘗試完成結帳。
+    回傳值："success" | "cart" | "failed"
+    "cart" = 商品已在購物車，但結帳流程未能自動完成，請手動結帳。
+    """
+    try:
+        resp = session.get(f"{BASE_URL}/checkout", allow_redirects=True, timeout=15)
+        checkout_url = resp.url
+        log.info(f"結帳頁 URL：{checkout_url}")
+
+        def _is_complete(r: requests.Response) -> bool:
+            return any(k in r.url for k in ("thank", "complete", "order")) or "感謝" in r.text
+
+        if _is_complete(resp):
+            log.info("結帳已完成（第 0 步後確認）")
+            return "success"
+
+        # 嘗試最多 3 個結帳步驟
+        for step in range(1, 4):
+            token = _extract_csrf(resp.text)
+            if not token:
+                log.warning(f"結帳 step{step} 找不到 CSRF token，停止")
+                break
+
+            fields = _hidden_fields(resp.text)
+            fields["authenticity_token"] = token
+
+            resp = session.post(resp.url, data=fields, allow_redirects=True, timeout=15)
+            log.info(f"結帳 step{step} → {resp.url}, HTTP {resp.status_code}")
+
+            if _is_complete(resp):
+                log.info(f"結帳完成（step{step}）")
+                return "success"
+
+        log.warning(f"結帳流程未確認完成，最終停在 {resp.url}")
+        return "cart"
+
+    except Exception as e:
+        log.error(f"結帳例外：{e}")
+        return "cart"
+
+
+def auto_buy(product: dict) -> str:
+    """登入 → 加入購物車 → 結帳。回傳 "success" | "cart" | "failed" | "skipped"。"""
+    if not FUNBOX_EMAIL or not FUNBOX_PASSWORD_SITE:
+        log.warning("未設定 FUNBOX_EMAIL / FUNBOX_PASSWORD，跳過自動購買")
+        return "skipped"
+
+    log.info(f"自動購買啟動：{product['title']}")
+    session = funbox_login()
+    if not session:
+        return "failed"
+
+    variant_id = product.get("variant_id")
+    if not variant_id:
+        log.error("找不到 variant_id，無法加入購物車")
+        return "failed"
+
+    if not funbox_add_to_cart(session, variant_id):
+        return "failed"
+
+    return funbox_checkout(session)
+
+
+# ─────────────────────────────────────────────
+# Email 通知
+# ─────────────────────────────────────────────
+
+_BUY_STATUS_LABEL = {
+    "success": "[已自動結帳完成]",
+    "cart":    "[已加入購物車，請手動完成結帳]",
+    "failed":  "[自動購買失敗，請手動下單]",
+    "skipped": "[未設定自動購買]",
+    "app_skip": "[APP 限定，已略過]",
+}
+
+
+def notify_products(products: list, buy_results: dict = None) -> bool:
     count = len(products)
     subject = f"【Funbox 有貨了！】偵測到 {count} 件商品"
 
@@ -133,6 +302,9 @@ def notify_products(products: list) -> bool:
         lines.append(f"價格：{p['price']}")
         lines.append(f"庫存：{p['inventory']} 件")
         lines.append(f"商品連結：{p['url']}")
+        if buy_results and p["href"] in buy_results:
+            label = _BUY_STATUS_LABEL.get(buy_results[p["href"]], buy_results[p["href"]])
+            lines.append(f"購買狀態：{label}")
         lines.append("-" * 40)
 
     lines += ["", f"完整商品頁：{COLLECTION_URL}"]
@@ -178,8 +350,19 @@ def check_once() -> bool:
         ]
 
         if to_notify:
-            log.info(f"發送通知：{len(to_notify)} 件（共 {len(products)} 件，跳過 {len(products)-len(to_notify)} 件冷卻中）")
-            notify_products(to_notify)
+            buy_results = {}
+            for p in to_notify:
+                if "APP" in p["title"].upper():
+                    log.info(f"APP 限定商品，略過自動購買：{p['title']}")
+                    buy_results[p["href"]] = "app_skip"
+                else:
+                    buy_results[p["href"]] = auto_buy(p)
+
+            log.info(
+                f"發送通知：{len(to_notify)} 件"
+                f"（共 {len(products)} 件，跳過 {len(products) - len(to_notify)} 件冷卻中）"
+            )
+            notify_products(to_notify, buy_results)
             for p in to_notify:
                 notified[p["href"]] = now.isoformat()
         else:
