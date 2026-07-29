@@ -36,7 +36,9 @@ BASE_URL = "https://shop.funbox.com.tw"
 CHECK_ROUNDS = int(os.environ.get("CHECK_ROUNDS", "1"))
 STATE_FILE = Path(os.environ.get("STATE_FILE", "seen_products.json"))
 NOTIFY_COOLDOWN = timedelta(hours=1)
-CART_QTY = 3  # 每件商品目標加入數量
+CART_QTY = 3          # 每件商品目標加入數量
+MAX_BUY_PRODUCTS = int(os.environ.get("MAX_BUY_PRODUCTS", "0"))  # 0 = 不限制
+TEST_MODE = os.environ.get("TEST_MODE", "").strip() not in ("", "0", "false")
 
 GMAIL_SENDER = os.environ["GMAIL_SENDER"]
 GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
@@ -415,6 +417,10 @@ def auto_buy_all(products: list) -> dict:
         log.info("所有商品均為 APP 限定，略過自動購買")
         return {}
 
+    if MAX_BUY_PRODUCTS > 0 and len(non_app) > MAX_BUY_PRODUCTS:
+        log.info(f"MAX_BUY_PRODUCTS={MAX_BUY_PRODUCTS}，僅購買前 {MAX_BUY_PRODUCTS} 件")
+        non_app = non_app[:MAX_BUY_PRODUCTS]
+
     log.info(f"自動購買啟動：{len(non_app)} 件商品 × {len(FUNBOX_ACCOUNTS)} 組帳號")
 
     results = {}
@@ -452,11 +458,16 @@ _CHECKOUT_LABEL = {
 
 def notify_products(products: list, account_results: dict = None) -> bool:
     count = len(products)
-    subject = f"【Funbox 有貨了！】偵測到 {count} 件商品"
+    test_tag = "【測試】" if TEST_MODE else ""
+    subject = f"{test_tag}【Funbox 有貨了！】偵測到 {count} 件商品"
 
     lines = [
         f"Funbox 官網偵測到共 {count} 件有庫存商品",
         f"偵測時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+    ]
+    if TEST_MODE:
+        lines.append("⚠ 本封為測試信件，監控目標為測試用 URL，請勿當作正式上架通知")
+    lines += [
         "",
         "=" * 50,
     ]
