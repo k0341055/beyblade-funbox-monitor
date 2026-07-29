@@ -217,6 +217,9 @@ def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
 
         r = sess.get(f"{BASE_URL}/cart", allow_redirects=True, timeout=10)
         cart_url = r.url
+        if "/carts/" not in cart_url:
+            log.error(f"[{email}] 購物車頁面異常（{cart_url}），session 可能失效或購物車為空")
+            return [], None, None
         cookies_list = [
             {
                 "name": c.name,
@@ -260,6 +263,10 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
             page.goto(cart_url, wait_until="domcontentloaded")
             page.wait_for_timeout(4000)
             log.info(f"[{email}] 結帳頁：{page.url}")
+            if "/carts/" not in page.url:
+                log.error(f"[{email}] 結帳頁面異常（{page.url}），中止結帳")
+                br.close()
+                return "cart"
 
             # 選擇 7-11 貨到付款
             clicked_711 = False
@@ -316,15 +323,36 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
                 except Exception:
                     pass
 
-            # 點擊立即結帳
-            page.locator("text=立即結帳").last.click()
-            log.info(f"[{email}] 已點擊立即結帳，等待跳轉...")
+            # 點擊立即結帳（用 btn-lg 精確定位，跳過頂部 nav 的隱藏連結）
+            clicked_checkout = False
+            for sel in [
+                "a.btn-lg:has-text('立即結帳')",
+                "a.btn-default:has-text('立即結帳')",
+            ]:
+                try:
+                    loc = page.locator(sel).first
+                    if loc.count() > 0 and loc.is_visible():
+                        loc.scroll_into_view_if_needed()
+                        loc.click()
+                        log.info(f"[{email}] 已點擊立即結帳，等待跳轉...")
+                        clicked_checkout = True
+                        break
+                except Exception:
+                    continue
+            if not clicked_checkout:
+                log.error(f"[{email}] 找不到結帳按鈕，中止")
+                br.close()
+                return "cart"
 
             # 輪詢結果（7-11 COD 不經過 3DS，通常直接到訂單確認頁）
             for _ in range(20):
                 page.wait_for_timeout(1500)
                 url = page.url
                 if any(k in url for k in ("order", "thank", "complete", "success")):
+                    if "show_failed" in url:
+                        log.warning(f"[{email}] 付款失敗（show_failed）：{url}")
+                        br.close()
+                        return "payment_failed"
                     log.info(f"[{email}] 結帳完成：{url}")
                     br.close()
                     return "success"
@@ -403,10 +431,11 @@ def auto_buy_all(products: list) -> dict:
 # ─────────────────────────────────────────────
 
 _CHECKOUT_LABEL = {
-    "success":     "✅ 已自動結帳完成",
-    "3ds_pending": "⚠ 訂單已建立（需完成銀行 3DS 驗證才能付款）",
-    "cart":        "🛒 商品已在購物車，請手動完成結帳",
-    "failed":      "❌ 自動購買失敗，請手動下單",
+    "success":        "✅ 已自動結帳完成",
+    "payment_failed": "❌ 訂單已建立但付款失敗（show_failed），請手動完成付款",
+    "3ds_pending":    "⚠ 訂單已建立（需完成銀行 3DS 驗證才能付款）",
+    "cart":           "🛒 商品已在購物車，請手動完成結帳",
+    "failed":         "❌ 自動購買失敗，請手動下單",
 }
 
 
