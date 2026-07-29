@@ -281,6 +281,32 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
             if not clicked_711:
                 log.warning(f"[{email}] 找不到 7-11 按鈕，繼續嘗試結帳")
 
+            # 套用優惠券（若有可用）
+            try:
+                coupon_open = page.locator("button.button-block:has-text('選擇優惠券或輸入優惠碼')").first
+                if coupon_open.count() > 0 and coupon_open.is_visible():
+                    coupon_open.click()
+                    page.wait_for_timeout(1500)
+                    # 選第一張可用的優惠券
+                    first_coupon = page.locator("[data-testid='checkable-radio']").first
+                    if first_coupon.count() > 0 and first_coupon.is_visible():
+                        first_coupon.click()
+                        page.wait_for_timeout(500)
+                        confirm_btn = page.locator("button.confirm-btn").first
+                        if confirm_btn.count() > 0 and confirm_btn.is_visible():
+                            confirm_btn.click()
+                            page.wait_for_timeout(1000)
+                            log.info(f"[{email}] 已套用優惠券")
+                        else:
+                            log.warning(f"[{email}] 找不到優惠券確認按鈕")
+                    else:
+                        log.info(f"[{email}] 無可用優惠券，關閉選單")
+                        # 按 Escape 或再按一次關閉
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(300)
+            except Exception as e:
+                log.warning(f"[{email}] 優惠券套用例外：{e}")
+
             # 勾選所有同意條款 checkbox
             for cb in page.locator("input[type='checkbox']").all():
                 try:
