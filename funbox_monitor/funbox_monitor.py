@@ -46,12 +46,13 @@ GMAIL_RECIPIENTS = [
     if addr.strip()
 ]
 
-# 支援多組帳號：FUNBOX_EMAIL / FUNBOX_EMAIL_2
+# 支援多組帳號：FUNBOX_EMAIL / FUNBOX_EMAIL_2 / FUNBOX_EMAIL_3
 FUNBOX_ACCOUNTS = [
     (e, p)
     for e, p in [
         (os.environ.get("FUNBOX_EMAIL", ""), os.environ.get("FUNBOX_PASSWORD", "")),
         (os.environ.get("FUNBOX_EMAIL_2", ""), os.environ.get("FUNBOX_PASSWORD_2", "")),
+        (os.environ.get("FUNBOX_EMAIL_3", ""), os.environ.get("FUNBOX_PASSWORD_3", "")),
     ]
     if e and p
 ]
@@ -124,6 +125,9 @@ def fetch_products() -> list:
     resp = requests.get(API_URL, timeout=10)
     resp.raise_for_status()
     raw = resp.json()
+    # 單一商品端點回傳 dict，集合端點回傳 list
+    if isinstance(raw, dict):
+        raw = [raw]
 
     products = []
     for item in raw:
@@ -135,6 +139,10 @@ def fetch_products() -> list:
         href = item.get("url", "")
         title = item.get("title", "(未知商品)").strip()
         price = f"NT${int(variant.get('price', 0))}"
+        # qc = 每筆訂單加購上限（null 表示無限制）
+        raw_qc = variant.get("qc")
+        qty_cap = int(raw_qc) if raw_qc is not None else None
+
         products.append({
             "href": href,
             "url": f"{BASE_URL}{href}" if href.startswith("/") else href,
@@ -142,8 +150,10 @@ def fetch_products() -> list:
             "price": price,
             "inventory": inventory,
             "variant_id": variant.get("id"),
+            "qty_cap": qty_cap,
         })
-        log.info(f"有庫存 → {title} | 庫存:{inventory} 件 | {price}")
+        cap_info = f"限購:{qty_cap}件/單" if qty_cap is not None else "無限購"
+        log.info(f"有庫存 → {title} | 庫存:{inventory} 件 | {cap_info} | {price}")
 
     log.info(f"API 回傳 {len(raw)} 件，有庫存 {len(products)} 件")
     return products
@@ -186,7 +196,8 @@ def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
         added = []
         for p in products:
             vid = p["variant_id"]
-            target_qty = min(CART_QTY, p["inventory"])
+            qty_cap = p.get("qty_cap")
+            target_qty = min(CART_QTY, p["inventory"], qty_cap) if qty_cap else min(CART_QTY, p["inventory"])
 
             r2 = sess.post(
                 f"{BASE_URL}/cart/add",
@@ -455,6 +466,8 @@ def notify_products(products: list, account_results: dict = None) -> bool:
         lines.append(f"商品名：{p['title']}")
         lines.append(f"價格：{p['price']}")
         lines.append(f"庫存：{p['inventory']} 件")
+        cap = p.get("qty_cap")
+        lines.append(f"下單上限：{'無限制' if cap is None else f'{cap} 件/筆'}")
         lines.append(f"商品連結：{p['url']}")
 
         if "APP" in p["title"].upper():
