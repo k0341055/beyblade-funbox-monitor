@@ -13,7 +13,7 @@ import re
 import smtplib
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -39,6 +39,8 @@ NOTIFY_COOLDOWN = timedelta(hours=1)
 CART_QTY = 3          # 每件商品目標加入數量
 MAX_BUY_PRODUCTS = int(os.environ.get("MAX_BUY_PRODUCTS", "0"))  # 0 = 不限制
 TEST_MODE = os.environ.get("TEST_MODE", "").strip() not in ("", "0", "false")
+
+TW_TZ = timezone(timedelta(hours=8))  # 台灣時區 UTC+8
 
 GMAIL_SENDER = os.environ["GMAIL_SENDER"]
 GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
@@ -110,12 +112,20 @@ def load_notified() -> dict:
 def save_notified(notified: dict):
     STATE_FILE.write_text(
         json.dumps(
-            {"notified": notified, "updated": datetime.now().isoformat()},
+            {"notified": notified, "updated": datetime.now(TW_TZ).isoformat()},
             ensure_ascii=False,
             indent=2,
         ),
         encoding="utf-8",
     )
+
+
+def _parse_ts(ts_str: str) -> datetime:
+    """解析 ISO 時間字串，若無時區資訊則補上台灣時區。"""
+    dt = datetime.fromisoformat(ts_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TW_TZ)
+    return dt
 
 
 # ─────────────────────────────────────────────
@@ -471,7 +481,7 @@ def notify_products(products: list, account_results: dict = None) -> bool:
 
     lines = [
         f"Funbox 官網偵測到共 {count} 件有庫存商品",
-        f"偵測時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"偵測時間：{datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M:%S')}（台灣時間）",
     ]
     if TEST_MODE:
         lines.append("⚠ 本封為測試信件，監控目標為測試用 URL，請勿當作正式上架通知")
@@ -531,19 +541,24 @@ def notify_products(products: list, account_results: dict = None) -> bool:
 def check_once() -> bool:
     try:
         products = fetch_products()
+        now = datetime.now(TW_TZ)
+        cutoff = now - NOTIFY_COOLDOWN
+
+        # 只保留「目前仍有庫存」的通知記錄；庫存歸零的商品立刻從 seen_products 移除，
+        # 確保下次重新上架時不受 1 小時冷卻限制，馬上觸發通知。
+        notified = load_notified()
+        current_hrefs = {p["href"] for p in products}
+        notified = {h: t for h, t in notified.items() if h in current_hrefs}
 
         if not products:
             log.info("目前無庫存商品，繼續監控")
+            save_notified(notified)  # 清空過時條目
             return True
-
-        now = datetime.now()
-        cutoff = now - NOTIFY_COOLDOWN
-        notified = load_notified()
 
         to_notify = [
             p for p in products
             if p["href"] not in notified
-            or datetime.fromisoformat(notified[p["href"]]) < cutoff
+            or _parse_ts(notified[p["href"]]) < cutoff
         ]
 
         if to_notify:
@@ -558,8 +573,6 @@ def check_once() -> bool:
         else:
             log.info(f"所有 {len(products)} 件商品均在 1 小時冷卻期內")
 
-        current_hrefs = {p["href"] for p in products}
-        notified = {h: t for h, t in notified.items() if h in current_hrefs}
         save_notified(notified)
         return True
 
