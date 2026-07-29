@@ -124,7 +124,7 @@ def save_notified(notified: dict):
 
 
 def fetch_products() -> list:
-    resp = requests.get(API_URL, timeout=10)
+    resp = requests.get(API_URL, timeout=30)
     resp.raise_for_status()
     raw = resp.json()
     # 單一商品端點回傳 dict，集合端點回傳 list
@@ -307,25 +307,30 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
                 if coupon_open.count() > 0 and coupon_open.is_visible():
                     coupon_open.click()
                     page.wait_for_timeout(1500)
-                    # 選第一張可用的優惠券
+                    # 選第一張可用的優惠券（force=True 跳過 modal 層遮擋）
                     first_coupon = page.locator("[data-testid='checkable-radio']").first
                     if first_coupon.count() > 0 and first_coupon.is_visible():
-                        first_coupon.click()
+                        first_coupon.click(force=True, timeout=5000)
                         page.wait_for_timeout(500)
                         confirm_btn = page.locator("button.confirm-btn").first
                         if confirm_btn.count() > 0 and confirm_btn.is_visible():
-                            confirm_btn.click()
+                            confirm_btn.click(force=True, timeout=5000)
                             page.wait_for_timeout(1000)
                             log.info(f"[{email}] 已套用優惠券")
                         else:
                             log.warning(f"[{email}] 找不到優惠券確認按鈕")
                     else:
                         log.info(f"[{email}] 無可用優惠券，關閉選單")
-                        # 按 Escape 或再按一次關閉
                         page.keyboard.press("Escape")
-                        page.wait_for_timeout(300)
+                        page.wait_for_timeout(500)
             except Exception as e:
                 log.warning(f"[{email}] 優惠券套用例外：{e}")
+                # 確保 modal 關閉，不遮擋後續結帳按鈕
+                try:
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(500)
+                except Exception:
+                    pass
 
             # 勾選所有同意條款 checkbox
             for cb in page.locator("input[type='checkbox']").all():
@@ -340,7 +345,10 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
             clicked_checkout = False
             for sel in [
                 "a.btn-lg:has-text('立即結帳')",
+                "button.btn-lg:has-text('立即結帳')",
                 "a.btn-default:has-text('立即結帳')",
+                "button.btn-default:has-text('立即結帳')",
+                ".btn-bloc:has-text('立即結帳')",
             ]:
                 try:
                     loc = page.locator(sel).first

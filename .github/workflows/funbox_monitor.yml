@@ -54,10 +54,7 @@ jobs:
           FUNBOX_PASSWORD_2: ${{ secrets.FUNBOX_PASSWORD_2 }}
           FUNBOX_EMAIL_3:    ${{ secrets.FUNBOX_EMAIL_3 }}
           FUNBOX_PASSWORD_3: ${{ secrets.FUNBOX_PASSWORD_3 }}
-          CHECK_ROUNDS:      '1'
+          CHECK_ROUNDS:      '50'
           STATE_FILE:        'seen_products.json'
-          SEARCH_URL:        'https://shop.funbox.com.tw/categories/takaratomy/tomica'
-          TEST_MODE:         '1'
-          MAX_BUY_PRODUCTS:  '1'
         working-directory: funbox_monitor
         run: python funbox_monitor.py
