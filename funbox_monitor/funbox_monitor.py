@@ -179,7 +179,8 @@ def fetch_products() -> list:
 def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
     """
     登入並將所有商品加入購物車（每件先試 CART_QTY，失敗則試 1）。
-    回傳 (added_hrefs, cart_url, cookies_list) 或 ([], None, None)。
+    回傳 (added_hrefs, attempted_hrefs, cart_url, cookies_list)。
+    attempted 是實際有嘗試加購的 href 清單；未傳入 products 的商品不在其中。
     """
     sess = requests.Session()
     sess.headers["User-Agent"] = _UA
@@ -188,7 +189,7 @@ def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
         token = _extract_csrf(r.text)
         if not token:
             log.error(f"[{email}] 登入頁找不到 CSRF token")
-            return [], None, None
+            return [], [], None, None
 
         r = sess.post(
             f"{BASE_URL}/account/login",
@@ -202,14 +203,16 @@ def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
         )
         if "login" in r.url:
             log.error(f"[{email}] 登入失敗，停在 {r.url}")
-            return [], None, None
+            return [], [], None, None
         log.info(f"[{email}] 登入成功")
 
         added = []
+        attempted = []
         for p in products:
             vid = p["variant_id"]
             qty_cap = p.get("qty_cap")
             target_qty = min(CART_QTY, p["inventory"], qty_cap) if qty_cap else min(CART_QTY, p["inventory"])
+            attempted.append(p["href"])
 
             r2 = sess.post(
                 f"{BASE_URL}/cart/add",
@@ -236,13 +239,13 @@ def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
 
         if not added:
             log.error(f"[{email}] 所有商品均加入失敗")
-            return [], None, None
+            return [], attempted, None, None
 
         r = sess.get(f"{BASE_URL}/cart", allow_redirects=True, timeout=10)
         cart_url = r.url
         if "/carts/" not in cart_url:
             log.error(f"[{email}] 購物車頁面異常（{cart_url}），session 可能失效或購物車為空")
-            return [], None, None
+            return [], attempted, None, None
         cookies_list = [
             {
                 "name": c.name,
@@ -252,12 +255,12 @@ def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
             }
             for c in sess.cookies
         ]
-        log.info(f"[{email}] 購物車 URL：{cart_url}，共加入 {len(added)} 件商品")
-        return added, cart_url, cookies_list
+        log.info(f"[{email}] 購物車 URL：{cart_url}，共加入 {len(added)}/{len(attempted)} 件商品")
+        return added, attempted, cart_url, cookies_list
 
     except Exception as e:
         log.error(f"[{email}] 登入/加購例外：{e}")
-        return [], None, None
+        return [], [], None, None
 
 
 # ─────────────────────────────────────────────
@@ -409,11 +412,11 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
 
 def _checkout_for_account(email: str, password: str, products: list) -> dict:
     """登入 → 全部加入購物車 → 一次結帳。"""
-    added, cart_url, cookies_list = _login_and_fill_cart(email, password, products)
+    added, attempted, cart_url, cookies_list = _login_and_fill_cart(email, password, products)
     if not cart_url:
-        return {"added": [], "checkout": "failed"}
+        return {"added": [], "attempted": attempted, "checkout": "failed"}
     checkout = _playwright_checkout(email, cart_url, cookies_list)
-    return {"added": added, "checkout": checkout}
+    return {"added": added, "attempted": attempted, "checkout": checkout}
 
 
 # ─────────────────────────────────────────────
@@ -502,9 +505,16 @@ def notify_products(products: list, account_results: dict = None) -> bool:
         if "APP" in p["title"].upper():
             lines.append("購買狀態：[APP 限定，已略過]")
         elif account_results:
-            for email, result in account_results.items():
-                status = "已加入購物車" if p["href"] in result.get("added", []) else "加入失敗"
-                lines.append(f"  ▸ {email}：{status}")
+            for acct_email, result in account_results.items():
+                attempted = result.get("attempted", [])
+                added = result.get("added", [])
+                if p["href"] in added:
+                    status = "✅ 已加入購物車"
+                elif p["href"] in attempted:
+                    status = "❌ 加入失敗（受限或錯誤）"
+                else:
+                    status = "— 未嘗試（超出本次購買上限）"
+                lines.append(f"  ▸ {acct_email}：{status}")
 
         lines.append("-" * 40)
 
