@@ -1,7 +1,8 @@
 """
 shop.funbox.com.tw 商品偵測器
-Cyberbiz /products.json API 直接回傳商品+庫存，無需 Playwright（偵測階段）。
-偵測到非 APP 限定商品時，自動登入並完成結帳（Playwright 跑結帳流程）。
+- 偵測：Cyberbiz /products.json API，每輪 < 1 秒
+- 下單：多帳號平行執行，每件商品加 3 個入購物車，全部加完後一次結帳
+- 付款：7-11 貨到付款（避免信用卡 3DS 卡單）
 """
 
 import json
@@ -11,6 +12,7 @@ import random
 import re
 import smtplib
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -34,6 +36,7 @@ BASE_URL = "https://shop.funbox.com.tw"
 CHECK_ROUNDS = int(os.environ.get("CHECK_ROUNDS", "1"))
 STATE_FILE = Path(os.environ.get("STATE_FILE", "seen_products.json"))
 NOTIFY_COOLDOWN = timedelta(hours=1)
+CART_QTY = 3  # 每件商品目標加入數量
 
 GMAIL_SENDER = os.environ["GMAIL_SENDER"]
 GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
@@ -43,8 +46,15 @@ GMAIL_RECIPIENTS = [
     if addr.strip()
 ]
 
-FUNBOX_EMAIL = os.environ.get("FUNBOX_EMAIL", "")
-FUNBOX_PASSWORD_SITE = os.environ.get("FUNBOX_PASSWORD", "")
+# 支援多組帳號：FUNBOX_EMAIL / FUNBOX_EMAIL_2
+FUNBOX_ACCOUNTS = [
+    (e, p)
+    for e, p in [
+        (os.environ.get("FUNBOX_EMAIL", ""), os.environ.get("FUNBOX_PASSWORD", "")),
+        (os.environ.get("FUNBOX_EMAIL_2", ""), os.environ.get("FUNBOX_PASSWORD_2", "")),
+    ]
+    if e and p
+]
 
 _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -123,28 +133,31 @@ def fetch_products() -> list:
             continue
 
         href = item.get("url", "")
+        title = item.get("title", "(未知商品)").strip()
+        price = f"NT${int(variant.get('price', 0))}"
         products.append({
             "href": href,
             "url": f"{BASE_URL}{href}" if href.startswith("/") else href,
-            "title": item.get("title", "(未知商品)").strip(),
-            "price": f"NT${int(variant.get('price', 0))}",
+            "title": title,
+            "price": price,
             "inventory": inventory,
             "variant_id": variant.get("id"),
         })
+        log.info(f"有庫存 → {title} | 庫存:{inventory} 件 | {price}")
 
     log.info(f"API 回傳 {len(raw)} 件，有庫存 {len(products)} 件")
     return products
 
 
 # ─────────────────────────────────────────────
-# 自動購買（requests 登入+加購 → Playwright 結帳）
+# 登入 + 加入購物車（requests）
 # ─────────────────────────────────────────────
 
 
-def _requests_login_and_add(variant_id: int) -> tuple:
+def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
     """
-    用 requests 完成登入 + 加入購物車。
-    回傳 (session, cart_url, cookies_list) 或 (None, None, None)。
+    登入並將所有商品加入購物車（每件先試 CART_QTY，失敗則試 1）。
+    回傳 (added_hrefs, cart_url, cookies_list) 或 ([], None, None)。
     """
     sess = requests.Session()
     sess.headers["User-Agent"] = _UA
@@ -152,34 +165,55 @@ def _requests_login_and_add(variant_id: int) -> tuple:
         r = sess.get(f"{BASE_URL}/account/login", timeout=10)
         token = _extract_csrf(r.text)
         if not token:
-            log.error("登入頁面找不到 CSRF token")
-            return None, None, None
+            log.error(f"[{email}] 登入頁找不到 CSRF token")
+            return [], None, None
 
         r = sess.post(
             f"{BASE_URL}/account/login",
             data={
-                "customer[login]": FUNBOX_EMAIL,
-                "customer[password]": FUNBOX_PASSWORD_SITE,
+                "customer[login]": email,
+                "customer[password]": password,
                 "authenticity_token": token,
             },
             allow_redirects=True,
             timeout=10,
         )
         if "login" in r.url:
-            log.error(f"Funbox 登入失敗，仍停在 {r.url}")
-            return None, None, None
-        log.info(f"Funbox 登入成功 → {r.url}")
+            log.error(f"[{email}] 登入失敗，停在 {r.url}")
+            return [], None, None
+        log.info(f"[{email}] 登入成功")
 
-        r = sess.post(
-            f"{BASE_URL}/cart/add",
-            data={"id": variant_id, "quantity": 1},
-            headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
-            timeout=10,
-        )
-        if r.status_code not in (200, 409):
-            log.error(f"加入購物車失敗，HTTP {r.status_code}")
-            return None, None, None
-        log.info(f"已加入購物車（variant_id={variant_id}，HTTP {r.status_code}）")
+        added = []
+        for p in products:
+            vid = p["variant_id"]
+            target_qty = min(CART_QTY, p["inventory"])
+
+            r2 = sess.post(
+                f"{BASE_URL}/cart/add",
+                data={"id": vid, "quantity": target_qty},
+                headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
+                timeout=10,
+            )
+            if r2.status_code in (200, 409):
+                log.info(f"[{email}] 加入購物車：{p['title']} x{target_qty}")
+                added.append(p["href"])
+            else:
+                # 限購或其他原因，退而求其次加 1 個
+                r3 = sess.post(
+                    f"{BASE_URL}/cart/add",
+                    data={"id": vid, "quantity": 1},
+                    headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
+                    timeout=10,
+                )
+                if r3.status_code in (200, 409):
+                    log.info(f"[{email}] 加入購物車：{p['title']} x1（受限）")
+                    added.append(p["href"])
+                else:
+                    log.error(f"[{email}] 無法加入購物車：{p['title']} (HTTP {r3.status_code})")
+
+        if not added:
+            log.error(f"[{email}] 所有商品均加入失敗")
+            return [], None, None
 
         r = sess.get(f"{BASE_URL}/cart", allow_redirects=True, timeout=10)
         cart_url = r.url
@@ -192,22 +226,28 @@ def _requests_login_and_add(variant_id: int) -> tuple:
             }
             for c in sess.cookies
         ]
-        return sess, cart_url, cookies_list
+        log.info(f"[{email}] 購物車 URL：{cart_url}，共加入 {len(added)} 件商品")
+        return added, cart_url, cookies_list
 
     except Exception as e:
-        log.error(f"登入/加購例外：{e}")
-        return None, None, None
+        log.error(f"[{email}] 登入/加購例外：{e}")
+        return [], None, None
 
 
-def _playwright_checkout(cart_url: str, cookies_list: list) -> str:
+# ─────────────────────────────────────────────
+# Playwright 結帳（7-11 貨到付款）
+# ─────────────────────────────────────────────
+
+
+def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
     """
-    用 Playwright 完成結帳。
-    回傳值："success" | "3ds_pending" | "cart" | "failed"
+    用 Playwright 完成結帳，選 7-11 貨到付款。
+    回傳："success" | "cart" | "3ds_pending" | "failed"
     """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        log.error("Playwright 未安裝，無法執行結帳")
+        log.error(f"[{email}] Playwright 未安裝")
         return "cart"
 
     try:
@@ -219,27 +259,29 @@ def _playwright_checkout(cart_url: str, cookies_list: list) -> str:
 
             page.goto(cart_url, wait_until="domcontentloaded")
             page.wait_for_timeout(4000)
-            log.info(f"結帳頁 URL：{page.url}")
+            log.info(f"[{email}] 結帳頁：{page.url}")
 
-            # 選擇信用卡付款
-            try:
-                page.locator("text=信用卡").first.click()
-                page.wait_for_timeout(800)
-            except Exception:
-                pass
-
-            # 選擇已存卡（下拉選第一個選項）
-            try:
-                sel = page.locator("select").all()
-                for s in sel:
-                    opts = s.evaluate("el => Array.from(el.options).map(o => o.text)")
-                    if opts:
-                        s.select_option(index=0)
+            # 選擇 7-11 貨到付款
+            clicked_711 = False
+            for sel in [
+                "button[id^='cvs-shipping-button']",
+                "button:has-text('7-11 貨到付款')",
+                "[data-translate-keys='cod_names.seven']",
+            ]:
+                try:
+                    btn = page.locator(sel).first
+                    if btn.count() > 0 and btn.is_visible():
+                        btn.click()
+                        page.wait_for_timeout(1000)
+                        log.info(f"[{email}] 已選擇 7-11 貨到付款")
+                        clicked_711 = True
                         break
-            except Exception:
-                pass
+                except Exception:
+                    continue
+            if not clicked_711:
+                log.warning(f"[{email}] 找不到 7-11 按鈕，繼續嘗試結帳")
 
-            # 勾選同意條款 checkbox
+            # 勾選所有同意條款 checkbox
             for cb in page.locator("input[type='checkbox']").all():
                 try:
                     if cb.is_visible() and not cb.is_checked():
@@ -250,64 +292,99 @@ def _playwright_checkout(cart_url: str, cookies_list: list) -> str:
 
             # 點擊立即結帳
             page.locator("text=立即結帳").last.click()
-            log.info("已點擊「立即結帳」，等待跳轉...")
+            log.info(f"[{email}] 已點擊立即結帳，等待跳轉...")
 
-            # 等待跳轉至銀行 3DS 或訂單確認
+            # 輪詢結果（7-11 COD 不經過 3DS，通常直接到訂單確認頁）
             for _ in range(20):
                 page.wait_for_timeout(1500)
                 url = page.url
                 if any(k in url for k in ("order", "thank", "complete", "success")):
-                    log.info(f"結帳完成！URL={url}")
+                    log.info(f"[{email}] 結帳完成：{url}")
                     br.close()
                     return "success"
+                # 萬一仍觸發 3DS（備用偵測）
                 if any(k in url for k in ("acs.", "challenge", "3ds", "sinopac", "esunbank", "authentication")):
-                    log.info(f"3DS 驗證頁面：{url}")
+                    log.warning(f"[{email}] 觸發非預期 3DS：{url}")
                     br.close()
                     return "3ds_pending"
 
-            log.warning(f"結帳後最終 URL={page.url}，狀態未確認")
+            log.warning(f"[{email}] 結帳後停在：{page.url}")
             br.close()
             return "cart"
 
     except Exception as e:
-        log.error(f"Playwright 結帳例外：{e}")
+        log.error(f"[{email}] Playwright 例外：{e}")
         return "cart"
 
 
-def auto_buy(product: dict) -> str:
-    """登入 → 加入購物車 → 結帳。回傳狀態字串。"""
-    if not FUNBOX_EMAIL or not FUNBOX_PASSWORD_SITE:
-        log.warning("未設定 FUNBOX_EMAIL / FUNBOX_PASSWORD，跳過自動購買")
-        return "skipped"
+# ─────────────────────────────────────────────
+# 單一帳號完整流程
+# ─────────────────────────────────────────────
 
-    log.info(f"自動購買啟動：{product['title']}")
-    variant_id = product.get("variant_id")
-    if not variant_id:
-        log.error("找不到 variant_id")
-        return "failed"
 
-    _, cart_url, cookies_list = _requests_login_and_add(variant_id)
+def _checkout_for_account(email: str, password: str, products: list) -> dict:
+    """登入 → 全部加入購物車 → 一次結帳。"""
+    added, cart_url, cookies_list = _login_and_fill_cart(email, password, products)
     if not cart_url:
-        return "failed"
+        return {"added": [], "checkout": "failed"}
+    checkout = _playwright_checkout(email, cart_url, cookies_list)
+    return {"added": added, "checkout": checkout}
 
-    return _playwright_checkout(cart_url, cookies_list)
+
+# ─────────────────────────────────────────────
+# 多帳號平行執行
+# ─────────────────────────────────────────────
+
+
+def auto_buy_all(products: list) -> dict:
+    """
+    對所有非 APP 商品，以每個帳號平行下單。
+    回傳 {email: {"added": [...hrefs...], "checkout": status}}
+    """
+    if not FUNBOX_ACCOUNTS:
+        log.warning("未設定任何 FUNBOX 帳號，跳過自動購買")
+        return {}
+
+    non_app = [p for p in products if "APP" not in p["title"].upper()]
+    if not non_app:
+        log.info("所有商品均為 APP 限定，略過自動購買")
+        return {}
+
+    log.info(f"自動購買啟動：{len(non_app)} 件商品 × {len(FUNBOX_ACCOUNTS)} 組帳號")
+
+    results = {}
+    if len(FUNBOX_ACCOUNTS) == 1:
+        email, pwd = FUNBOX_ACCOUNTS[0]
+        results[email] = _checkout_for_account(email, pwd, non_app)
+    else:
+        with ThreadPoolExecutor(max_workers=len(FUNBOX_ACCOUNTS)) as executor:
+            futures = {
+                executor.submit(_checkout_for_account, email, pwd, non_app): email
+                for email, pwd in FUNBOX_ACCOUNTS
+            }
+            for future in as_completed(futures):
+                email = futures[future]
+                try:
+                    results[email] = future.result()
+                except Exception as e:
+                    log.error(f"[{email}] 執行緒例外：{e}")
+                    results[email] = {"added": [], "checkout": "failed"}
+    return results
 
 
 # ─────────────────────────────────────────────
 # Email 通知
 # ─────────────────────────────────────────────
 
-_BUY_STATUS_LABEL = {
-    "success":     "[已自動結帳完成]",
-    "3ds_pending": "[訂單已建立，請立即完成銀行 3DS 驗證（OTP 簡訊或 Wallet App）才能完成付款]",
-    "cart":        "[已加入購物車，請手動完成結帳]",
-    "failed":      "[自動購買失敗，請手動下單]",
-    "skipped":     "[未設定自動購買帳密]",
-    "app_skip":    "[APP 限定，已略過]",
+_CHECKOUT_LABEL = {
+    "success":     "✅ 已自動結帳完成",
+    "3ds_pending": "⚠ 訂單已建立（需完成銀行 3DS 驗證才能付款）",
+    "cart":        "🛒 商品已在購物車，請手動完成結帳",
+    "failed":      "❌ 自動購買失敗，請手動下單",
 }
 
 
-def notify_products(products: list, buy_results: dict = None) -> bool:
+def notify_products(products: list, account_results: dict = None) -> bool:
     count = len(products)
     subject = f"【Funbox 有貨了！】偵測到 {count} 件商品"
 
@@ -317,24 +394,28 @@ def notify_products(products: list, buy_results: dict = None) -> bool:
         "",
         "=" * 50,
     ]
+
     for i, p in enumerate(products, 1):
         lines.append(f"\n【商品 {i}】")
         lines.append(f"商品名：{p['title']}")
         lines.append(f"價格：{p['price']}")
         lines.append(f"庫存：{p['inventory']} 件")
         lines.append(f"商品連結：{p['url']}")
-        if buy_results and p["href"] in buy_results:
-            label = _BUY_STATUS_LABEL.get(buy_results[p["href"]], buy_results[p["href"]])
-            lines.append(f"購買狀態：{label}")
+
+        if "APP" in p["title"].upper():
+            lines.append("購買狀態：[APP 限定，已略過]")
+        elif account_results:
+            for email, result in account_results.items():
+                status = "已加入購物車" if p["href"] in result.get("added", []) else "加入失敗"
+                lines.append(f"  ▸ {email}：{status}")
+
         lines.append("-" * 40)
 
-    if buy_results and "3ds_pending" in buy_results.values():
-        lines += [
-            "",
-            "⚠ 注意：有訂單需要 3DS 驗證",
-            f"請前往訂單頁確認：{BASE_URL}/account/orders",
-            "並完成銀行 OTP 簡訊或 Wallet App 驗證以完成付款。",
-        ]
+    if account_results:
+        lines += ["", "=" * 50, "各帳號結帳結果", "=" * 50]
+        for email, result in account_results.items():
+            label = _CHECKOUT_LABEL.get(result.get("checkout", ""), result.get("checkout", ""))
+            lines.append(f"▸ {email}：{label}")
 
     lines += ["", f"完整商品頁：{COLLECTION_URL}"]
     body = "\n".join(lines)
@@ -379,19 +460,12 @@ def check_once() -> bool:
         ]
 
         if to_notify:
-            buy_results = {}
-            for p in to_notify:
-                if "APP" in p["title"].upper():
-                    log.info(f"APP 限定商品，略過自動購買：{p['title']}")
-                    buy_results[p["href"]] = "app_skip"
-                else:
-                    buy_results[p["href"]] = auto_buy(p)
-
+            account_results = auto_buy_all(to_notify)
             log.info(
                 f"發送通知：{len(to_notify)} 件"
                 f"（共 {len(products)} 件，跳過 {len(products) - len(to_notify)} 件冷卻中）"
             )
-            notify_products(to_notify, buy_results)
+            notify_products(to_notify, account_results)
             for p in to_notify:
                 notified[p["href"]] = now.isoformat()
         else:
@@ -416,7 +490,7 @@ def check_once() -> bool:
 
 
 def main():
-    log.info(f"Funbox 商品偵測器 | 輪數：{CHECK_ROUNDS}")
+    log.info(f"Funbox 商品偵測器 | 輪數：{CHECK_ROUNDS} | 帳號數：{len(FUNBOX_ACCOUNTS)}")
     for round_num in range(1, CHECK_ROUNDS + 1):
         if CHECK_ROUNDS > 1:
             log.info(f"── 第 {round_num}/{CHECK_ROUNDS} 輪 ──")
