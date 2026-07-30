@@ -9,7 +9,7 @@ env:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 10   # 正常執行 ~5~7 分鐘，留緩衝（首次 browser 安裝最多 +2 分鐘）
+    timeout-minutes: 62
 
     steps:
       - name: Checkout code
@@ -63,7 +63,7 @@ jobs:
           GMAIL_SENDER:     ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD:   ${{ secrets.GMAIL_PASSWORD }}
           GMAIL_RECIPIENTS: ${{ secrets.GMAIL_RECIPIENTS }}
-          CHECK_ROUNDS:     '12'
+          CHECK_ROUNDS:     '130'
           STATE_FILE:       'seen_products.json'
         working-directory: beyblade_monitor
         run: python beyblade_monitor.py

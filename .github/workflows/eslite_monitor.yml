@@ -6,7 +6,7 @@ on:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 62
 
     steps:
       - name: Checkout code
@@ -48,7 +48,7 @@ jobs:
           GMAIL_SENDER:      ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD:    ${{ secrets.GMAIL_PASSWORD }}
           GMAIL_RECIPIENTS:  ${{ secrets.GMAIL_RECIPIENTS }}
-          CHECK_ROUNDS:      '1'
+          CHECK_ROUNDS:      '180'
           STATE_FILE:        'seen_products.json'
         working-directory: eslite_monitor
         run: python eslite_monitor.py

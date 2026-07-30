@@ -6,7 +6,7 @@ on:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 65
 
     steps:
       - name: Checkout code
@@ -54,7 +54,7 @@ jobs:
           FUNBOX_PASSWORD_2: ${{ secrets.FUNBOX_PASSWORD_2 }}
           FUNBOX_EMAIL_3:    ${{ secrets.FUNBOX_EMAIL_3 }}
           FUNBOX_PASSWORD_3: ${{ secrets.FUNBOX_PASSWORD_3 }}
-          CHECK_ROUNDS:      '50'
+          CHECK_ROUNDS:      '680'
           STATE_FILE:        'seen_products.json'
         working-directory: funbox_monitor
         run: python funbox_monitor.py
