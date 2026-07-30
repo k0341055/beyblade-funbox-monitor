@@ -6,46 +6,27 @@
 
 ## 架構圖
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                           cron-job.org                               │
-│                每小時 POST → GitHub API（三個獨立任務）               │
-└──────────┬─────────────────────┬──────────────────────┬─────────────┘
-           │                     │                      │
-  workflow_dispatch      workflow_dispatch      workflow_dispatch
-           │                     │                      │
-┌──────────▼───────┐  ┌──────────▼────────┐  ┌─────────▼──────────┐
-│  GitHub Actions  │  │  GitHub Actions   │  │  GitHub Actions    │
-│ beyblade_monitor │  │  funbox_monitor   │  │  eslite_monitor    │
-│  (ubuntu VM)     │  │   (ubuntu VM)     │  │   (ubuntu VM)      │
-└──────────┬───────┘  └──────────┬────────┘  └─────────┬──────────┘
-           │                     │                      │
-┌──────────▼───────┐  ┌──────────▼────────┐  ┌─────────▼──────────┐
-│  Playwright +    │  │  requests (登入/  │  │  Playwright +      │
-│  Chromium        │  │  加購) +           │  │  Chromium          │
-│  130 輪 / 次     │  │  Playwright (結帳)│  │  300 輪 / 次       │
-│  （共用瀏覽器）  │  │  680 輪 / 次      │  │  （共用瀏覽器）    │
-└──────────┬───────┘  └──────────┬────────┘  └─────────┬──────────┘
-           │                     │                      │
-┌──────────▼───────┐  ┌──────────▼────────┐  ┌─────────▼──────────┐
-│  1999.co.jp      │  │ shop.funbox.com.tw│  │ athena.eslite.com  │
-│  Beyblade X 頁   │  │  戰鬥陀螺集合頁    │  │  Beyblade X 專區   │
-│  (有 Cloudflare) │  │  Cyberbiz SPA     │  │  (有 Cloudflare)   │
-└──────────┬───────┘  └──────────┬────────┘  └─────────┬──────────┘
-           │                     │                      │
-           └────────────┬────────┘──────────────────────┘
-                        │
-           ┌────────────▼───────────┐
-           │   1 小時冷卻去重邏輯    │
-           │  seen_products.json    │
-           │  (GitHub Actions cache)│
-           └────────────┬───────────┘
-                        │ 有新商品 / 冷卻到期
-           ┌────────────▼───────────┐
-           │     Gmail SMTP SSL     │
-           │  → GMAIL_RECIPIENTS    │
-           │    (GitHub Secret)     │
-           └────────────────────────┘
+```mermaid
+flowchart TD
+    CRON["cron-job.org\n每小時 POST → GitHub API\n（三個獨立任務）"]
+
+    CRON -->|workflow_dispatch| GA1["GitHub Actions\nbeyblade_monitor\nubuntu VM"]
+    CRON -->|workflow_dispatch| GA2["GitHub Actions\nfunbox_monitor\nubuntu VM"]
+    CRON -->|workflow_dispatch| GA3["GitHub Actions\neslite_monitor\nubuntu VM"]
+
+    GA1 --> PW1["Playwright + Chromium\n130 輪 / 次\n共用瀏覽器"]
+    GA2 --> REQ["requests 登入／加購\n＋ Playwright 結帳\n680 輪 / 次"]
+    GA3 --> PW3["Playwright + Chromium\n300 輪 / 次\n共用瀏覽器"]
+
+    PW1 --> SITE1["1999.co.jp\nBeyblade X 頁\nCloudflare 保護"]
+    REQ --> SITE2["shop.funbox.com.tw\n戰鬥陀螺集合頁\nCyberbiz SPA"]
+    PW3 --> SITE3["athena.eslite.com\nBeyblade X 專區\nCloudflare 保護"]
+
+    SITE1 --> COOL["1 小時冷卻去重邏輯\nseen_products.json\nGitHub Actions cache"]
+    SITE2 --> COOL
+    SITE3 --> COOL
+
+    COOL -->|有新商品 / 冷卻到期| MAIL["Gmail SMTP SSL\n→ GMAIL_RECIPIENTS\nGitHub Secret"]
 ```
 
 ---
