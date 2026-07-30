@@ -48,7 +48,7 @@ jobs:
           GMAIL_SENDER:      ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD:    ${{ secrets.GMAIL_PASSWORD }}
           GMAIL_RECIPIENTS:  ${{ secrets.GMAIL_RECIPIENTS }}
-          CHECK_ROUNDS:      '180'
+          CHECK_ROUNDS:      '300'
           STATE_FILE:        'seen_products.json'
         working-directory: eslite_monitor
         run: python eslite_monitor.py

@@ -3,6 +3,7 @@
 - 偵測：athena.eslite.com book_exhibits API（Cloudflare 保護，需 Playwright 瀏覽器取得）
 - 通知：Gmail SMTP
 - 冷卻：同款商品 1 小時內最多通知一次；庫存歸零即清除，重新上架立即通知
+- 效能：單次執行僅啟動一次 Chromium，所有輪次共用同一 page（減少啟動開銷）
 """
 
 import json
@@ -16,8 +17,9 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 from dotenv import load_dotenv
+from playwright.sync_api import sync_playwright
 
-load_dotenv()
+load_dotenv(dotenv_path=".env")
 
 # ─────────────────────────────────────────────
 # 設定區
@@ -42,7 +44,6 @@ GMAIL_RECIPIENTS = [
     if addr.strip()
 ]
 
-# 略過的商品關鍵字（名稱含此字串則跳過通知），逗號分隔
 SKIP_KEYWORDS = [
     kw.strip()
     for kw in os.environ.get("ESLITE_SKIP_KEYWORDS", "UX-14").split(",")
@@ -131,8 +132,8 @@ def _extract_products(data: dict) -> dict:
                 or "unknown"
             ),
             "stock": stock,
-            "account_qty_limit": p.get("account_qty_limit"),  # 帳號購買上限
-            "order_qty_limit": p.get("order_qty_limit"),      # 每單購買上限
+            "account_qty_limit": p.get("account_qty_limit"),
+            "order_qty_limit": p.get("order_qty_limit"),
             "image": p.get("image", ""),
             "url": f"{ESLITE_BASE}/product/{guid}",
         }
@@ -151,26 +152,18 @@ def _extract_products(data: dict) -> dict:
     return products
 
 
-def fetch_products() -> list:
+def fetch_products(page) -> list:
     """
-    用 Playwright 瀏覽器取得 API（繞過 Cloudflare），
+    使用傳入的 Playwright page 導覽至 API URL，
     遞迴解析後回傳有庫存且不在略過清單的商品列表。
     """
-    from playwright.sync_api import sync_playwright
+    page.goto(API_URL, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(2000)
 
-    with sync_playwright() as pw:
-        br = pw.chromium.launch(headless=True)
-        ctx = br.new_context(user_agent=_UA)
-        page = ctx.new_page()
-        page.goto(API_URL, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(2000)
-
-        # API 回應以 <pre> 標籤包住 JSON
-        try:
-            raw = page.inner_text("pre")
-        except Exception:
-            raw = page.inner_text("body")
-        br.close()
+    try:
+        raw = page.inner_text("pre")
+    except Exception:
+        raw = page.inner_text("body")
 
     data = json.loads(raw)
     all_products = _extract_products(data)
@@ -180,12 +173,10 @@ def fetch_products() -> list:
         name = p["name"]
         stock = p["stock"]
 
-        # 略過指定商品
         if any(kw.upper() in name.upper() for kw in SKIP_KEYWORDS):
             log.info(f"略過：{name}")
             continue
 
-        # 庫存為 0 或無法判斷 → 跳過
         if not stock or stock <= 0:
             continue
 
@@ -248,15 +239,14 @@ def notify_products(products: list) -> bool:
 # ─────────────────────────────────────────────
 
 
-def check_once() -> bool:
+def check_once(page) -> bool:
     try:
-        products = fetch_products()
+        products = fetch_products(page)
         now = datetime.now(TW_TZ)
         cutoff = now - NOTIFY_COOLDOWN
 
         notified = load_notified()
         current_guids = {p["guid"] for p in products}
-        # 庫存歸零的商品立即從 seen_products 移除，下次上架視為新品
         notified = {g: t for g, t in notified.items() if g in current_guids}
 
         if not products:
@@ -286,6 +276,11 @@ def check_once() -> bool:
 
     except Exception as e:
         log.error(f"執行例外：{e}", exc_info=True)
+        # 頁面可能進入錯誤狀態，導覽至空白頁重置
+        try:
+            page.goto("about:blank")
+        except Exception:
+            pass
         return False
 
 
@@ -296,14 +291,23 @@ def check_once() -> bool:
 
 def main():
     log.info(f"誠品 Beyblade X 監控器 | 輪數：{CHECK_ROUNDS} | 略過：{SKIP_KEYWORDS}")
-    for round_num in range(1, CHECK_ROUNDS + 1):
-        if CHECK_ROUNDS > 1:
-            log.info(f"── 第 {round_num}/{CHECK_ROUNDS} 輪 ──")
-        check_once()
-        if round_num < CHECK_ROUNDS:
-            wait = random.randint(3, 5)
-            log.info(f"等待 {wait} 秒後進行下一輪...")
-            time.sleep(wait)
+
+    with sync_playwright() as pw:
+        br = pw.chromium.launch(headless=True)
+        ctx = br.new_context(user_agent=_UA)
+        page = ctx.new_page()
+
+        for round_num in range(1, CHECK_ROUNDS + 1):
+            if CHECK_ROUNDS > 1:
+                log.info(f"── 第 {round_num}/{CHECK_ROUNDS} 輪 ──")
+            check_once(page)
+            if round_num < CHECK_ROUNDS:
+                wait = random.randint(3, 5)
+                log.info(f"等待 {wait} 秒後進行下一輪...")
+                time.sleep(wait)
+
+        br.close()
+
     log.info("所有輪次完成")
 
 
