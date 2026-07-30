@@ -1,0 +1,54 @@
+name: 誠品 Beyblade X Monitor
+
+on:
+  workflow_dispatch:   # 由 cron-job.org 透過 GitHub API 觸發
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-eslite-${{ runner.os }}
+
+      - name: Install Python dependencies
+        run: pip install -r eslite_monitor/requirements.txt
+
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('eslite_monitor/requirements.txt') }}
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install chromium --with-deps
+
+      - name: Restore seen products state
+        uses: actions/cache@v4
+        with:
+          path: eslite_monitor/seen_products.json
+          key: eslite-seen-${{ github.run_id }}
+          restore-keys: |
+            eslite-seen-
+
+      - name: Run Eslite monitor
+        env:
+          GMAIL_SENDER:      ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD:    ${{ secrets.GMAIL_PASSWORD }}
+          GMAIL_RECIPIENTS:  ${{ secrets.GMAIL_RECIPIENTS }}
+          CHECK_ROUNDS:      '1'
+          STATE_FILE:        'seen_products.json'
+        working-directory: eslite_monitor
+        run: python eslite_monitor.py
