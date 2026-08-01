@@ -1,11 +1,10 @@
 """
-1999.co.jp Beyblade X 新商品偵測 + 自動加入購物車
-偵測 https://www.1999.co.jp/search?typ1_c=100&cat=&searchkey=beyblade+X&sortid=7&soldout=0
+1999.co.jp 商品偵測 + 自動加入購物車
 有庫存時：
   - 廣播通知（1 小時冷卻）→ 所有 GMAIL_RECIPIENTS
   - 個人加購通知（每輪）→ 只寄給帳號本人（SITE_1999_EMAIL）
 每輪均嘗試加入購物車，直到商品下架為止。
-1999 平台限制：每款 Beyblade X 限購 1 件，程式不嘗試更改數量。
+加購採用 /Service/AjaxResponse.aspx?action=AddCart，在 browser context 內呼叫，無需導航商品頁。
 """
 
 import asyncio
@@ -14,6 +13,7 @@ import logging
 import os
 import random
 import smtplib
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -54,10 +54,19 @@ GMAIL_RECIPIENTS = [
 SITE_EMAIL    = os.environ.get("SITE_1999_EMAIL", "")
 SITE_PASSWORD = os.environ.get("SITE_1999_PASSWORD", "")
 
-# 加入購物車後頁面出現這些文字代表成功
-_CART_SUCCESS = ["カートに入れました", "カートに追加しました", "ショッピングカートに入れました", "数量変更"]
-# 這些代表無法加入（售完或限購攔截）
-_CART_FAIL    = ["売り切れ", "品切れ", "カートに入れません", "購入できません", "在庫なし"]
+def _extract_keyword(url: str) -> str:
+    """從 SEARCH_URL 的 searchkey 參數提取人類可讀的關鍵字，用於 email 主旨。"""
+    try:
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        return params.get("searchkey", ["商品"])[0].replace("+", " ")
+    except Exception:
+        return "商品"
+
+NOTIFY_KEYWORD = os.environ.get("PRODUCT_NAME", _extract_keyword(SEARCH_URL))
+
+# AddCart 回應格式：SUCCESS$HS$<cartCount>$HS$<msg> 或錯誤文字
+_AJAX_ENDPOINT = "/Service/AjaxResponse.aspx"
+_CART_FAIL_RESP = ["売り切れ", "品切れ", "在庫なし", "カートに入れません", "購入できません"]
 
 # ─────────────────────────────────────────────
 # 隨機 UA / Viewport（反 Cloudflare 指紋）
@@ -239,45 +248,81 @@ async def fetch_products(page) -> list:
 # ─────────────────────────────────────────────
 
 
+async def _get_item_code(page):
+    """從已載入的商品頁 DOM 擷取 itemCode（供 AddCart AJAX 使用）。"""
+    return await page.evaluate("""() => {
+        // 1. data-itemcd 屬性（最常見）
+        const byData = document.querySelector('[data-itemcd]');
+        if (byData) return byData.getAttribute('data-itemcd');
+
+        // 2. hidden input: id 或 name 含 itemCode / ItemCode
+        const byInput = document.querySelector(
+            'input[name*="itemCode"], input[id*="itemCode"], input[id*="ItemCode"]'
+        );
+        if (byInput) return byInput.value || null;
+
+        // 3. onclick handler 含 AddCart（如 onclick="AddCart('BX-01',...)"）
+        const byOnclick = document.querySelector('[onclick*="AddCart"]');
+        if (byOnclick) {
+            const m = byOnclick.getAttribute('onclick').match(/'([A-Z0-9\\-]+)'/);
+            if (m) return m[1];
+        }
+
+        // 4. inline <script> 中的 itemCode 變數
+        for (const s of document.scripts) {
+            const m = (s.textContent || '').match(/itemCode\\s*=\\s*['"]([^'"]+)['"]/);
+            if (m) return m[1];
+        }
+        return null;
+    }""")
+
+
 async def add_to_cart_single(page, product: dict) -> str:
     """
-    導航到商品頁並點擊 カートに入れる。
+    導航到商品頁取得 itemCode，再用 AJAX 加入購物車（不點 UI 按鈕）。
     回傳：'success' | 'sold_out' | 'not_found' | 'error'
     """
     try:
         await page.goto(product["url"], wait_until="domcontentloaded", timeout=20_000)
-        await page.wait_for_timeout(_jitter(1_200))
+        await page.wait_for_timeout(_jitter(600))
 
-        # nth(1) 為商品詳情頁的實體按鈕（nth(0) 通常是 header 的靜態文字）
-        clicked = False
-        for nth in [1, 0]:
-            try:
-                btn = page.get_by_text("カートに入れる").nth(nth)
-                cnt = await btn.count()
-                if cnt > 0 and await btn.is_visible():
-                    await btn.click()
-                    await page.wait_for_timeout(2_000)
-                    clicked = True
-                    break
-            except Exception:
-                continue
-
-        if not clicked:
-            log.warning(f"找不到 カートに入れる 按鈕：{product['title']}")
+        item_code = await _get_item_code(page)
+        if not item_code:
+            log.warning(f"找不到 itemCode：{product['title']}")
             return "not_found"
 
-        # 判斷結果
-        try:
-            body = await page.locator("body").inner_text(timeout=2_000)
-        except Exception:
-            body = ""
+        log.info(f"  itemCode={item_code}")
 
-        if any(kw in body for kw in _CART_FAIL):
+        # 在已登入的 browser context 內直接 POST AddCart，繞過 Cloudflare
+        response: str = await page.evaluate("""async (itemCode) => {
+            try {
+                const r = await fetch('/Service/AjaxResponse.aspx', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: 'action=AddCart&itemCode=' + encodeURIComponent(itemCode) + '&piece=1'
+                });
+                return await r.text();
+            } catch(e) {
+                return 'FETCH_ERROR:' + e.message;
+            }
+        }""", item_code)
+
+        log.info(f"  AddCart 回應: {str(response)[:120]}")
+
+        resp_str = str(response)
+        if "SUCCESS" in resp_str.upper():
+            log.info(f"加入購物車成功：{product['title']}")
+            return "success"
+        if any(kw in resp_str for kw in _CART_FAIL_RESP):
             log.warning(f"商品無法加入（售完或限購）：{product['title']}")
             return "sold_out"
 
-        log.info(f"加入購物車成功：{product['title']}")
-        return "success"
+        log.warning(f"加購狀態未知：{product['title']} | {resp_str[:80]}")
+        return "error"
 
     except Exception as e:
         log.error(f"加入購物車例外：{product['title']} | {e}")
@@ -326,11 +371,11 @@ def _send_email(to: list, subject: str, body: str):
 def send_broadcast_email(products: list, cart_results: dict):
     """廣播通知：寄給全體 GMAIL_RECIPIENTS（冷卻後才發）。"""
     count = len(products)
-    subject = f"【1999 Beyblade X 補貨！】偵測到 {count} 件商品"
+    subject = f"【1999 {NOTIFY_KEYWORD} 補貨！】偵測到 {count} 件商品"
     now_str = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
     lines = [
-        f"1999.co.jp 偵測到 Beyblade X 共 {count} 件有庫存商品",
+        f"1999.co.jp 偵測到 {NOTIFY_KEYWORD} 共 {count} 件有庫存商品",
         f"偵測時間：{now_str}（台灣時間）",
         "",
         "=" * 50,
@@ -464,7 +509,7 @@ async def check_once(page, logged_in: bool) -> bool:
 
 
 async def main():
-    log.info(f"1999 Beyblade X 監控器 | 輪數：{CHECK_ROUNDS}")
+    log.info(f"1999 監控器 | 關鍵字：{NOTIFY_KEYWORD} | 輪數：{CHECK_ROUNDS}")
 
     ua       = _random_ua()
     viewport = _random_viewport()
