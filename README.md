@@ -10,7 +10,7 @@
 flowchart TD
     CRON["cron-job.org\n每小時 POST → GitHub API\n（三個獨立任務）"]
 
-    CRON -->|workflow_dispatch| GA1["GitHub Actions\nbeyblade_monitor\nubuntu VM"]
+    CRON -->|workflow_dispatch| GA1["GitHub Actions\n1999_monitor\nubuntu VM"]
     CRON -->|workflow_dispatch| GA2["GitHub Actions\nfunbox_monitor\nubuntu VM"]
     CRON -->|workflow_dispatch| GA3["GitHub Actions\neslite_monitor\nubuntu VM"]
 
@@ -37,11 +37,11 @@ flowchart TD
 beyblade-funbox-monitor/
 ├── .github/
 │   └── workflows/
-│       ├── beyblade_monitor.yml   # 1999.co.jp Beyblade X workflow
+│       ├── 1999_monitor.yml       # 1999.co.jp Beyblade X workflow
 │       ├── funbox_monitor.yml     # Funbox 戰鬥陀螺 workflow
 │       └── eslite_monitor.yml     # 誠品 Beyblade X workflow
-├── beyblade_monitor/
-│   ├── beyblade_monitor.py        # 主程式（Playwright，含 Cloudflare 反偵測）
+├── 1999_monitor/
+│   ├── 1999_monitor.py            # 主程式（Playwright，含 Cloudflare 反偵測）
 │   └── requirements.txt
 ├── funbox_monitor/
 │   ├── funbox_monitor.py          # 主程式（requests + Playwright 混合架構）
@@ -306,12 +306,12 @@ cd eslite_monitor && python eslite_monitor.py
     key: eslite-seen-${{ github.run_id }}
     restore-keys: eslite-seen-
 
-# 1999 (Beyblade)
+# 1999
 - uses: actions/cache@v4
   with:
-    path: beyblade_monitor/seen_products.json
-    key: beyblade-seen-${{ github.run_id }}
-    restore-keys: beyblade-seen-
+    path: 1999_monitor/seen_products.json
+    key: 1999-seen-${{ github.run_id }}
+    restore-keys: 1999-seen-
 ```
 
 ---
@@ -322,7 +322,7 @@ cd eslite_monitor && python eslite_monitor.py
 
 ```
 POST https://api.github.com/repos/k0341055/beyblade-funbox-monitor/actions/workflows/funbox_monitor.yml/dispatches
-POST https://api.github.com/repos/k0341055/beyblade-funbox-monitor/actions/workflows/beyblade_monitor.yml/dispatches
+POST https://api.github.com/repos/k0341055/beyblade-funbox-monitor/actions/workflows/1999_monitor.yml/dispatches
 POST https://api.github.com/repos/k0341055/beyblade-funbox-monitor/actions/workflows/eslite_monitor.yml/dispatches
 ```
 
