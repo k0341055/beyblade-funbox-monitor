@@ -55,7 +55,7 @@ beyblade-funbox-monitor/
 
 ## 三個監控器比較
 
-| | 1999 (Beyblade) | Funbox | 誠品 (Eslite) |
+| | 1999 | Funbox | 誠品 (Eslite) |
 |---|---|---|---|
 | 目標網站 | `1999.co.jp` | `shop.funbox.com.tw` | `eslite.com` |
 | 偵測商品 | Beyblade X 系列 | 戰鬥陀螺 | Beyblade X 專區 |
