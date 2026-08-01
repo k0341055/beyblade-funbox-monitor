@@ -41,7 +41,7 @@ beyblade-funbox-monitor/
 │       ├── funbox_monitor.yml     # Funbox 戰鬥陀螺 workflow
 │       └── eslite_monitor.yml     # 誠品 Beyblade X workflow
 ├── 1999_monitor/
-│   ├── 1999_monitor.py            # 主程式（Playwright，含 Cloudflare 反偵測）
+│   ├── 1999_monitor.py            # 主程式（Playwright，含 Cloudflare 反偵測，僅通知）
 │   └── requirements.txt
 ├── funbox_monitor/
 │   ├── funbox_monitor.py          # 主程式（requests + Playwright 混合架構）
@@ -63,8 +63,40 @@ beyblade-funbox-monitor/
 | 技術架構 | Playwright 全程（async） | requests 登入/加購 + Playwright 結帳 | Playwright 全程（sync，共用瀏覽器） |
 | 每次執行輪數 | 190 輪（間隔 5~8 秒） | 820 輪（間隔 3~5 秒） | 580 輪（間隔 3~5 秒） |
 | 執行時長 / timeout | 約 60 分鐘 / 62 min | 約 57 分鐘 / 65 min | 約 45 分鐘 / 62 min |
-| 自動下單 | 無 | 有（3 帳號平行） | 無 |
+| 自動下單 | 無（結帳需通過 reCAPTCHA） | 有（3 帳號平行） | 無 |
 | 觸發頻率 | 每小時一次 | 每小時一次 | 每小時一次 |
+
+---
+
+## 1999 監控器功能
+
+### 偵測邏輯
+
+使用 Playwright 開啟搜尋頁（`sortid=7&soldout=0` 只顯示有庫存商品），解析以下欄位：
+
+| 欄位 | 說明 |
+|---|---|
+| 商品標題 | `div.c-card__title` |
+| 發售日 | `div.c-card__maker` |
+| 價格 | `div.c-card__price-element` |
+| 折扣 | `div.c-card__price-tags-discount` |
+| 商品連結 | `a.c-card__info-links` |
+
+搜尋結果為空時，程式會自動區分兩種情況：
+- **Cloudflare 攔截**：偵測到 challenge-form 等元素 → WARNING log
+- **目前無現貨**：搜尋結果正常但為空 → INFO log（正常情形，不報錯）
+
+### 冷卻邏輯
+
+與 Funbox / 誠品完全一致：1 小時冷卻、商品消失即清除 `seen_products`。
+
+### Email 通知格式
+
+- 主旨：`【1999 beyblade X 補貨！】偵測到 N 件商品`
+- 每件商品顯示：商品名、發售日、價格（含折扣）、商品連結
+- 末尾附上購物車結帳連結（`https://www.1999.co.jp/order`）與完整搜尋頁連結
+- 偵測時間（台灣時間 UTC+8）
+- 無自動下單（1999.co.jp 結帳流程需通過 reCAPTCHA，須人工完成）
 
 ---
 
@@ -230,6 +262,18 @@ beyblade-funbox-monitor/
 
 ### 本機開發
 
+**`1999_monitor/.env`**（不進版控）：
+
+```env
+GMAIL_SENDER=your@gmail.com
+GMAIL_PASSWORD=xxxx xxxx xxxx xxxx
+GMAIL_RECIPIENTS=your@gmail.com
+CHECK_ROUNDS=1
+HEADLESS=false
+# 可選：覆蓋預設搜尋關鍵字（預設為 beyblade X）
+# SEARCH_URL=https://www.1999.co.jp/search?typ1_c=100&cat=&searchkey=tomica&sortid=7&soldout=0
+```
+
 **`funbox_monitor/.env`**（不進版控）：
 
 ```env
@@ -273,7 +317,20 @@ STATE_FILE=seen_products.json
 | `ESLITE_SKIP_KEYWORDS` | `UX-14` | 略過的商品關鍵字，逗號分隔 |
 | `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 580） |
 
+#### 1999 選填環境變數
+
+| 變數 | 預設值 | 說明 |
+|---|---|---|
+| `SEARCH_URL` | Beyblade X 搜尋頁 URL | 監控目標（可替換為任意 1999.co.jp 搜尋 URL） |
+| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 190） |
+| `HEADLESS` | `true` | 設為 `false` 可在本機看到瀏覽器視窗 |
+
 ```bash
+# 1999
+pip install -r 1999_monitor/requirements.txt
+python -m playwright install chromium
+cd 1999_monitor && python 1999_monitor.py
+
 # Funbox
 pip install -r funbox_monitor/requirements.txt
 python -m playwright install chromium
@@ -292,6 +349,13 @@ cd eslite_monitor && python eslite_monitor.py
 `seen_products.json` 由 GitHub Actions cache 在跨執行之間傳遞（三個監控各自獨立）：
 
 ```yaml
+# 1999
+- uses: actions/cache@v4
+  with:
+    path: 1999_monitor/seen_products.json
+    key: 1999-seen-${{ github.run_id }}
+    restore-keys: 1999-seen-
+
 # Funbox
 - uses: actions/cache@v4
   with:
@@ -305,13 +369,6 @@ cd eslite_monitor && python eslite_monitor.py
     path: eslite_monitor/seen_products.json
     key: eslite-seen-${{ github.run_id }}
     restore-keys: eslite-seen-
-
-# 1999
-- uses: actions/cache@v4
-  with:
-    path: 1999_monitor/seen_products.json
-    key: 1999-seen-${{ github.run_id }}
-    restore-keys: 1999-seen-
 ```
 
 ---

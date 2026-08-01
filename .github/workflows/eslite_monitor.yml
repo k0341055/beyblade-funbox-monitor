@@ -35,6 +35,7 @@ jobs:
       - name: Install Playwright Chromium
         run: python -m playwright install chromium --with-deps
 
+      # ── 通知冷卻狀態 ────────────────────────────────────────────────
       - name: Restore seen products state
         uses: actions/cache@v4
         with:
@@ -43,12 +44,52 @@ jobs:
           restore-keys: |
             eslite-seen-
 
+      # ── 下單狀態（避免重複下單） ─────────────────────────────────────
+      - name: Restore order state
+        uses: actions/cache@v4
+        with:
+          path: eslite_monitor/eslite_order_state.json
+          key: eslite-order-${{ github.run_id }}
+          restore-keys: |
+            eslite-order-
+
+      # ── Session 狀態（信任裝置 cookies，避免每次觸發簡訊驗證） ────────
+      # 優先從 cache 讀取（較新），cache miss 時從 secret 解碼（備援）
+      - name: Restore session state from cache
+        uses: actions/cache@v4
+        id: session-cache
+        with:
+          path: eslite_monitor/eslite_storage_state.json
+          key: eslite-session-${{ github.run_id }}
+          restore-keys: |
+            eslite-session-
+
+      - name: Restore session state from secret (fallback)
+        if: steps.session-cache.outputs.cache-hit != 'true'
+        env:
+          ESLITE_STORAGE_STATE_B64: ${{ secrets.ESLITE_STORAGE_STATE_B64 }}
+        run: |
+          if [ -n "$ESLITE_STORAGE_STATE_B64" ]; then
+            echo "$ESLITE_STORAGE_STATE_B64" | base64 -d > eslite_monitor/eslite_storage_state.json
+            echo "已從 secret 還原 session 狀態"
+          fi
+
       - name: Run Eslite monitor
         env:
-          GMAIL_SENDER:      ${{ secrets.GMAIL_SENDER }}
-          GMAIL_PASSWORD:    ${{ secrets.GMAIL_PASSWORD }}
-          GMAIL_RECIPIENTS:  ${{ secrets.GMAIL_RECIPIENTS }}
-          CHECK_ROUNDS:      '580'
-          STATE_FILE:        'seen_products.json'
+          GMAIL_SENDER:         ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD:       ${{ secrets.GMAIL_PASSWORD }}
+          GMAIL_RECIPIENTS:     ${{ secrets.GMAIL_RECIPIENTS }}
+          ESLITE_ACCOUNT:       ${{ secrets.ESLITE_ACCOUNT }}
+          ESLITE_PASSWORD:      ${{ secrets.ESLITE_PASSWORD }}
+          ORDER_RECIPIENT:      ${{ secrets.ORDER_RECIPIENT }}
+          CHECKOUT_CITY:        ${{ secrets.CHECKOUT_CITY }}
+          CHECKOUT_STORE_CODE:  ${{ secrets.CHECKOUT_STORE_CODE }}
+          AUTO_CHECKOUT:        'true'
+          HEADLESS:             'true'
+          CHECK_ROUNDS:         '580'
+          CHECKOUT_MAX:         '3'
+          STATE_FILE:           'seen_products.json'
+          ORDER_STATE_FILE:     'eslite_order_state.json'
+          STORAGE_STATE_FILE:   'eslite_storage_state.json'
         working-directory: eslite_monitor
         run: python eslite_monitor.py

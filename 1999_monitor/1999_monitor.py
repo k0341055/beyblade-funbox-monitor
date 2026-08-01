@@ -1,10 +1,7 @@
 """
-1999.co.jp 商品偵測 + 自動加入購物車
-有庫存時：
-  - 廣播通知（1 小時冷卻）→ 所有 GMAIL_RECIPIENTS
-  - 個人加購通知（每輪）→ 只寄給帳號本人（SITE_1999_EMAIL）
-每輪均嘗試加入購物車，直到商品下架為止。
-加購採用 /Service/AjaxResponse.aspx?action=AddCart，在 browser context 內呼叫，無需導航商品頁。
+1999.co.jp 商品偵測 + Email 通知
+偵測到有庫存商品時，依 1 小時冷卻邏輯寄送 Email 給所有 GMAIL_RECIPIENTS。
+不自動下單（1999.co.jp 結帳需通過 reCAPTCHA，需人工完成）。
 """
 
 import asyncio
@@ -50,23 +47,16 @@ GMAIL_RECIPIENTS = [
     if addr.strip()
 ]
 
-# 1999.co.jp 帳號（單一）
-SITE_EMAIL    = os.environ.get("SITE_1999_EMAIL", "")
-SITE_PASSWORD = os.environ.get("SITE_1999_PASSWORD", "")
 
 def _extract_keyword(url: str) -> str:
-    """從 SEARCH_URL 的 searchkey 參數提取人類可讀的關鍵字，用於 email 主旨。"""
     try:
         params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
         return params.get("searchkey", ["商品"])[0].replace("+", " ")
     except Exception:
         return "商品"
 
-NOTIFY_KEYWORD = os.environ.get("PRODUCT_NAME", _extract_keyword(SEARCH_URL))
 
-# AddCart 回應格式：SUCCESS$HS$<cartCount>$HS$<msg> 或錯誤文字
-_AJAX_ENDPOINT = "/Service/AjaxResponse.aspx"
-_CART_FAIL_RESP = ["売り切れ", "品切れ", "在庫なし", "カートに入れません", "購入できません"]
+NOTIFY_KEYWORD = os.environ.get("PRODUCT_NAME", _extract_keyword(SEARCH_URL))
 
 # ─────────────────────────────────────────────
 # 隨機 UA / Viewport（反 Cloudflare 指紋）
@@ -109,6 +99,24 @@ def _random_viewport() -> dict:
 def _jitter(base_ms: int, pct: float = 0.3) -> int:
     delta = int(base_ms * pct)
     return base_ms + random.randint(-delta, delta)
+
+
+async def _wait_cf(page, max_ms: int = 15_000):
+    """等待 Cloudflare JS 挑戰自動通過。"""
+    try:
+        await page.wait_for_function(
+            """() => {
+                const t = document.title;
+                return !t.includes('Just a moment') &&
+                       !t.includes('Checking your browser') &&
+                       !t.includes('Attention Required') &&
+                       !t.includes('ちょっと待ってください') &&
+                       !document.querySelector('#challenge-form, .cf-browser-verification');
+            }""",
+            timeout=max_ms,
+        )
+    except Exception:
+        pass
 
 
 def _mask_email(email: str) -> str:
@@ -160,30 +168,6 @@ def _parse_ts(ts_str: str) -> datetime:
 
 
 # ─────────────────────────────────────────────
-# 登入
-# ─────────────────────────────────────────────
-
-
-async def do_login(page) -> bool:
-    """登入 1999.co.jp，成功回傳 True。"""
-    try:
-        await page.goto("https://www.1999.co.jp/login", wait_until="domcontentloaded", timeout=20_000)
-        await page.wait_for_timeout(1_000)
-        await page.locator("#txtUserID").fill(SITE_EMAIL)
-        await page.locator("#txtUserPW").fill(SITE_PASSWORD)
-        await page.get_by_role("button", name="ログイン").click()
-        await page.wait_for_load_state("networkidle", timeout=15_000)
-        if "login" in page.url.lower():
-            log.error("登入失敗：仍在登入頁面")
-            return False
-        log.info(f"1999 登入成功 → {page.url}")
-        return True
-    except Exception as e:
-        log.error(f"登入例外：{e}")
-        return False
-
-
-# ─────────────────────────────────────────────
 # 擷取商品清單（Playwright）
 # ─────────────────────────────────────────────
 
@@ -200,7 +184,16 @@ async def fetch_products(page) -> list:
     try:
         await page.wait_for_selector("div.c-card__info", timeout=10_000)
     except PlaywrightTimeoutError:
-        log.warning("找不到商品卡，可能遭 Cloudflare 封鎖或頁面結構已變更")
+        # 先判斷是 Cloudflare 攔截還是單純無有庫存商品
+        is_cf = await page.evaluate("""() =>
+            document.title.includes('Just a moment') ||
+            document.title.includes('Checking') ||
+            !!document.querySelector('#challenge-form, .cf-browser-verification')
+        """)
+        if is_cf:
+            log.warning("偵測到 Cloudflare 挑戰，本輪跳過")
+        else:
+            log.info("目前查無有庫存商品（搜尋結果為空）")
         return []
 
     cards = await page.query_selector_all("div.c-card__info")
@@ -244,114 +237,8 @@ async def fetch_products(page) -> list:
 
 
 # ─────────────────────────────────────────────
-# 加入購物車
-# ─────────────────────────────────────────────
-
-
-async def _get_item_code(page):
-    """從已載入的商品頁 DOM 擷取 itemCode（供 AddCart AJAX 使用）。"""
-    return await page.evaluate("""() => {
-        // 1. data-itemcd 屬性（最常見）
-        const byData = document.querySelector('[data-itemcd]');
-        if (byData) return byData.getAttribute('data-itemcd');
-
-        // 2. hidden input: id 或 name 含 itemCode / ItemCode
-        const byInput = document.querySelector(
-            'input[name*="itemCode"], input[id*="itemCode"], input[id*="ItemCode"]'
-        );
-        if (byInput) return byInput.value || null;
-
-        // 3. onclick handler 含 AddCart（如 onclick="AddCart('BX-01',...)"）
-        const byOnclick = document.querySelector('[onclick*="AddCart"]');
-        if (byOnclick) {
-            const m = byOnclick.getAttribute('onclick').match(/'([A-Z0-9\\-]+)'/);
-            if (m) return m[1];
-        }
-
-        // 4. inline <script> 中的 itemCode 變數
-        for (const s of document.scripts) {
-            const m = (s.textContent || '').match(/itemCode\\s*=\\s*['"]([^'"]+)['"]/);
-            if (m) return m[1];
-        }
-        return null;
-    }""")
-
-
-async def add_to_cart_single(page, product: dict) -> str:
-    """
-    導航到商品頁取得 itemCode，再用 AJAX 加入購物車（不點 UI 按鈕）。
-    回傳：'success' | 'sold_out' | 'not_found' | 'error'
-    """
-    try:
-        await page.goto(product["url"], wait_until="domcontentloaded", timeout=20_000)
-        await page.wait_for_timeout(_jitter(600))
-
-        item_code = await _get_item_code(page)
-        if not item_code:
-            log.warning(f"找不到 itemCode：{product['title']}")
-            return "not_found"
-
-        log.info(f"  itemCode={item_code}")
-
-        # 在已登入的 browser context 內直接 POST AddCart，繞過 Cloudflare
-        response: str = await page.evaluate("""async (itemCode) => {
-            try {
-                const r = await fetch('/Service/AjaxResponse.aspx', {
-                    method: 'POST',
-                    credentials: 'include',
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded',
-                        'X-Requested-With': 'XMLHttpRequest'
-                    },
-                    body: 'action=AddCart&itemCode=' + encodeURIComponent(itemCode) + '&piece=1'
-                });
-                return await r.text();
-            } catch(e) {
-                return 'FETCH_ERROR:' + e.message;
-            }
-        }""", item_code)
-
-        log.info(f"  AddCart 回應: {str(response)[:120]}")
-
-        resp_str = str(response)
-        if "SUCCESS" in resp_str.upper():
-            log.info(f"加入購物車成功：{product['title']}")
-            return "success"
-        if any(kw in resp_str for kw in _CART_FAIL_RESP):
-            log.warning(f"商品無法加入（售完或限購）：{product['title']}")
-            return "sold_out"
-
-        log.warning(f"加購狀態未知：{product['title']} | {resp_str[:80]}")
-        return "error"
-
-    except Exception as e:
-        log.error(f"加入購物車例外：{product['title']} | {e}")
-        return "error"
-
-
-async def add_to_cart_all(page, products: list) -> dict:
-    """
-    對所有商品嘗試加入購物車。
-    回傳 {href: status_str}
-    """
-    results = {}
-    for p in products:
-        log.info(f"  → 嘗試加購：{p['title']}")
-        status = await add_to_cart_single(page, p)
-        results[p["href"]] = status
-    return results
-
-
-# ─────────────────────────────────────────────
 # Email 通知
 # ─────────────────────────────────────────────
-
-_CART_LABEL = {
-    "success":  "✅ 已加入購物車",
-    "sold_out": "❌ 無法加入（售完或限購）",
-    "not_found":"⚠ 找不到加購按鈕",
-    "error":    "❌ 加入時發生例外",
-}
 
 
 def _send_email(to: list, subject: str, body: str):
@@ -368,8 +255,8 @@ def _send_email(to: list, subject: str, body: str):
         log.error(f"Email 發送失敗：{e}")
 
 
-def send_broadcast_email(products: list, cart_results: dict):
-    """廣播通知：寄給全體 GMAIL_RECIPIENTS（冷卻後才發）。"""
+def send_notify_email(products: list):
+    """寄送商品有庫存通知，含購買連結。"""
     count = len(products)
     subject = f"【1999 {NOTIFY_KEYWORD} 補貨！】偵測到 {count} 件商品"
     now_str = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -390,22 +277,11 @@ def send_broadcast_email(products: list, cart_results: dict):
             price_str += f"（{p['discount']}）"
         lines.append(f"價格：{price_str}")
         lines.append(f"商品連結：{p['url']}")
-        if cart_results:
-            label = _CART_LABEL.get(cart_results.get(p["href"], ""), "")
-            lines.append(f"加購狀態：{label}")
         lines.append("-" * 40)
-
-    if cart_results:
-        n_ok = sum(1 for s in cart_results.values() if s == "success")
-        lines += [
-            "",
-            f"自動加購結果：{n_ok}/{len(cart_results)} 件成功加入購物車",
-            f"📧 詳細加購結果已個別寄送至 {_mask_email(SITE_EMAIL)}",
-        ]
 
     lines += [
         "",
-        "─ 點擊下方連結手動結帳 ─",
+        "─ 點擊下方連結前往購物車結帳 ─",
         f"🛒 {CHECKOUT_URL}",
         "",
         f"完整搜尋頁：{SEARCH_URL}",
@@ -413,49 +289,16 @@ def send_broadcast_email(products: list, cart_results: dict):
     _send_email(GMAIL_RECIPIENTS, subject, "\n".join(lines))
 
 
-def send_personal_cart_email(products: list, cart_results: dict):
-    """個人加購通知：只寄給 SITE_EMAIL（若在收件人名單中）。"""
-    if SITE_EMAIL not in GMAIL_RECIPIENTS:
-        return
-
-    n_ok   = sum(1 for s in cart_results.values() if s == "success")
-    n_fail = len(cart_results) - n_ok
-    now_str = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    subject = f"【1999 你的加購結果】{n_ok} 件成功 / {n_fail} 件失敗"
-
-    lines = [
-        f"帳號：{SITE_EMAIL}",
-        f"偵測時間：{now_str}（台灣時間）",
-        "",
-        "=" * 50,
-        "各商品加購狀態",
-        "=" * 50,
-    ]
-    for p in products:
-        status = cart_results.get(p["href"], "—")
-        label  = _CART_LABEL.get(status, status)
-        lines.append(f"▸ {p['title']}：{label}")
-        lines.append(f"  連結：{p['url']}")
-
-    lines += [
-        "",
-        "─ 點擊下方連結手動結帳 ─",
-        f"🛒 {CHECKOUT_URL}",
-    ]
-    _send_email([SITE_EMAIL], subject, "\n".join(lines))
-
-
 # ─────────────────────────────────────────────
 # 核心偵測邏輯（每輪）
 # ─────────────────────────────────────────────
 
 
-async def check_once(page, logged_in: bool) -> bool:
+async def check_once(page) -> bool:
     try:
         products = await fetch_products(page)
 
         if not products:
-            log.warning("未擷取到任何商品，跳過本輪")
             return False
 
         now    = datetime.now(TW_TZ)
@@ -473,27 +316,16 @@ async def check_once(page, logged_in: bool) -> bool:
             or _parse_ts(notified[p["href"]]) < cutoff
         ]
 
-        # 每輪對所有在庫商品嘗試加入購物車
-        cart_results = {}
-        if logged_in:
-            log.info(f"開始加入購物車：{len(products)} 件")
-            cart_results = await add_to_cart_all(page, products)
-
-        # 廣播通知（冷卻限制）
         if to_notify:
             log.info(
-                f"發送廣播通知：{len(to_notify)} 件"
+                f"發送通知：{len(to_notify)} 件"
                 f"（共 {len(products)} 件，跳過 {len(products)-len(to_notify)} 件冷卻中）"
             )
-            send_broadcast_email(to_notify, cart_results)
+            send_notify_email(to_notify)
             for p in to_notify:
                 notified[p["href"]] = now.isoformat()
         else:
             log.info(f"所有 {len(products)} 件商品均在 1 小時冷卻期內")
-
-        # 個人加購通知（每輪，只要有嘗試加購就發）
-        if cart_results:
-            send_personal_cart_email(products, cart_results)
 
         save_notified(notified)
         return True
@@ -504,7 +336,7 @@ async def check_once(page, logged_in: bool) -> bool:
 
 
 # ─────────────────────────────────────────────
-# 主程式：瀏覽器開一次，登入一次，跑完所有輪次
+# 主程式：瀏覽器開一次，跑完所有輪次
 # ─────────────────────────────────────────────
 
 
@@ -540,19 +372,10 @@ async def main():
         )
         page = await context.new_page()
 
-        # 登入一次，之後每輪復用同一 session
-        logged_in = False
-        if SITE_EMAIL and SITE_PASSWORD:
-            logged_in = await do_login(page)
-            if not logged_in:
-                log.warning("登入失敗，本次執行僅偵測，不自動加購")
-        else:
-            log.warning("未設定 SITE_1999_EMAIL / SITE_1999_PASSWORD，跳過自動加購")
-
         for round_num in range(1, CHECK_ROUNDS + 1):
             if CHECK_ROUNDS > 1:
                 log.info(f"── 第 {round_num}/{CHECK_ROUNDS} 輪 ──")
-            await check_once(page, logged_in)
+            await check_once(page)
             if round_num < CHECK_ROUNDS:
                 wait = random.randint(5, 8)
                 log.info(f"等待 {wait} 秒後進行下一輪...")
