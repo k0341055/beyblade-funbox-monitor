@@ -282,7 +282,7 @@ def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
                 f"{BASE_URL}/cart/add",
                 data={"id": vid, "quantity": target_qty},
                 headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
-                timeout=10,
+                timeout=30,
             )
             if r2.status_code == 200:
                 log.info(f"[{email}] 加入購物車：{p['title']} x{target_qty}")
@@ -298,7 +298,7 @@ def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
                         f"{BASE_URL}/cart/add",
                         data={"id": vid, "quantity": 1},
                         headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
-                        timeout=10,
+                        timeout=30,
                     )
                     if r3.status_code == 200:
                         log.info(f"[{email}] 加入購物車：{p['title']} x1（降量重試成功）")
@@ -315,7 +315,7 @@ def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
             log.error(f"[{email}] 所有商品均加入失敗")
             return [], attempted, None, None
 
-        r = sess.get(f"{BASE_URL}/cart", allow_redirects=True, timeout=10)
+        r = sess.get(f"{BASE_URL}/cart", allow_redirects=True, timeout=30)
         cart_url = r.url
         if "/carts/" not in cart_url:
             log.error(f"[{email}] 購物車頁面異常（{cart_url}），session 可能失效或購物車為空")
