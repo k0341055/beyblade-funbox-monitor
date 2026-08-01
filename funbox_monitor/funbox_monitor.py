@@ -419,6 +419,25 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
                 except Exception:
                     pass
 
+            # 紅利點數重設為 0（避免自動折抵影響訂單金額）
+            try:
+                bonus_input = page.get_by_role(
+                    "spinbutton", name="請輸入會員紅利折抵點數"
+                ).first
+                if bonus_input.count() > 0 and bonus_input.is_visible():
+                    bonus_input.click()
+                    bonus_input.press("ControlOrMeta+a")
+                    bonus_input.fill("0")
+                    confirm_bonus = page.get_by_role("button", name="確認").first
+                    if confirm_bonus.count() > 0 and confirm_bonus.is_visible():
+                        confirm_bonus.click()
+                        page.wait_for_timeout(800)
+                        log.info(f"[{email}] 紅利點數已設為 0")
+                    else:
+                        log.warning(f"[{email}] 找不到紅利確認按鈕")
+            except Exception as e:
+                log.warning(f"[{email}] 紅利點數重設例外：{e}")
+
             # 勾選所有同意條款 checkbox
             for cb in page.locator("input[type='checkbox']").all():
                 try:
