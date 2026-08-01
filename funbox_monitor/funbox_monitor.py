@@ -539,7 +539,28 @@ _CHECKOUT_LABEL = {
 }
 
 
-def notify_products(products: list, account_results: dict = None) -> bool:
+def _send_email(to: list, subject: str, body: str) -> bool:
+    """底層 SMTP 發送，to 為收件人清單。"""
+    try:
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = GMAIL_SENDER
+        msg["To"] = ", ".join(to)
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
+            server.login(GMAIL_SENDER, GMAIL_PASSWORD)
+            server.sendmail(GMAIL_SENDER, to, msg.as_string())
+        log.info(f"Email 發送成功 → {[_mask_email(r) for r in to]}")
+        return True
+    except Exception as e:
+        log.error(f"Email 發送失敗：{e}")
+        return False
+
+
+def _broadcast_email(products: list, account_results: dict = None) -> None:
+    """
+    廣播通知：寄給全體 GMAIL_RECIPIENTS。
+    包含商品資訊與各帳號結帳摘要（不含個別帳號的詳細加購狀態）。
+    """
     count = len(products)
     test_tag = "【測試】" if TEST_MODE else ""
     subject = f"{test_tag}【Funbox 有貨了！】偵測到 {count} 件商品"
@@ -549,11 +570,8 @@ def notify_products(products: list, account_results: dict = None) -> bool:
         f"偵測時間：{datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M:%S')}（台灣時間）",
     ]
     if TEST_MODE:
-        lines.append("⚠ 本封為測試信件，監控目標為測試用 URL，請勿當作正式上架通知")
-    lines += [
-        "",
-        "=" * 50,
-    ]
+        lines.append("⚠ 本封為測試信件，請勿當作正式上架通知")
+    lines += ["", "=" * 50]
 
     for i, p in enumerate(products, 1):
         lines.append(f"\n【商品 {i}】")
@@ -564,46 +582,72 @@ def notify_products(products: list, account_results: dict = None) -> bool:
         lines.append(f"API 限購：{'無限制' if cap is None else f'{cap} 件/筆'}")
         lines.append(f"實際加購：{get_target_qty(p)} 件/帳號")
         lines.append(f"商品連結：{p['url']}")
-
         if "APP" in p["title"].upper():
             lines.append("購買狀態：[APP 限定，已略過]")
-        elif account_results:
-            for acct_email, result in account_results.items():
-                attempted = result.get("attempted", [])
-                added = result.get("added", [])
-                if p["href"] in added:
-                    status = "✅ 已加入購物車"
-                elif p["href"] in attempted:
-                    status = "❌ 加入失敗（受限或錯誤）"
-                else:
-                    status = "— 未嘗試（超出本次購買上限）"
-                lines.append(f"  ▸ {acct_email}：{status}")
-
         lines.append("-" * 40)
 
     if account_results:
-        lines += ["", "=" * 50, "各帳號結帳結果", "=" * 50]
-        for email, result in account_results.items():
+        lines += ["", "=" * 50, "自動下單摘要", "=" * 50]
+        for acct_email, result in account_results.items():
             label = _CHECKOUT_LABEL.get(result.get("checkout", ""), result.get("checkout", ""))
-            lines.append(f"▸ {email}：{label}")
+            n_added = len(result.get("added", []))
+            n_tried = len(result.get("attempted", []))
+            lines.append(f"▸ {acct_email}：{label}（加入 {n_added}/{n_tried} 件）")
+        lines.append("")
+        lines.append("📧 各帳號詳細結帳資訊已個別寄送至對應信箱")
 
     lines += ["", f"完整商品頁：{COLLECTION_URL}"]
-    body = "\n".join(lines)
+    _send_email(GMAIL_RECIPIENTS, subject, "\n".join(lines))
 
-    try:
-        msg = MIMEText(body, "plain", "utf-8")
-        msg["Subject"] = subject
-        msg["From"] = GMAIL_SENDER
-        msg["To"] = ", ".join(GMAIL_RECIPIENTS)
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
-            server.login(GMAIL_SENDER, GMAIL_PASSWORD)
-            server.sendmail(GMAIL_SENDER, GMAIL_RECIPIENTS, msg.as_string())
-        masked = [_mask_email(r) for r in GMAIL_RECIPIENTS]
-        log.info(f"Email 發送成功 → {masked}")
-        return True
-    except Exception as e:
-        log.error(f"Email 發送失敗：{e}")
-        return False
+
+def _personal_checkout_email(acct_email: str, result: dict, products: list) -> None:
+    """
+    個人結帳通知：只寄給該 Funbox 帳號本人（前提是該 email 在 GMAIL_RECIPIENTS 中）。
+    包含該帳號每件商品的加購狀態與結帳結果。
+    """
+    attempted = result.get("attempted", [])
+    added = result.get("added", [])
+    checkout = result.get("checkout", "failed")
+    label = _CHECKOUT_LABEL.get(checkout, checkout)
+    test_tag = "【測試】" if TEST_MODE else ""
+    subject = f"{test_tag}【Funbox 你的結帳結果】{label}"
+
+    lines = [
+        f"帳號：{acct_email}",
+        f"結帳結果：{label}",
+        f"偵測時間：{datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M:%S')}（台灣時間）",
+        "",
+        "=" * 50,
+        "各商品加購狀態",
+        "=" * 50,
+    ]
+
+    for p in products:
+        if "APP" in p["title"].upper():
+            status = "— APP 限定，已略過"
+        elif p["href"] in added:
+            status = f"✅ 已加入購物車（x{get_target_qty(p)} 件）"
+        elif p["href"] in attempted:
+            status = "❌ 加入失敗（受限或錯誤）"
+        else:
+            status = "— 未嘗試（超出本次購買上限）"
+        lines.append(f"▸ {p['title']}：{status}")
+
+    lines += ["", f"完整商品頁：{COLLECTION_URL}"]
+    _send_email([acct_email], subject, "\n".join(lines))
+
+
+def notify_products(products: list, account_results: dict = None) -> bool:
+    """
+    廣播通知 → 全體 GMAIL_RECIPIENTS（商品資訊 + 下單摘要）
+    個人通知 → 各 Funbox 帳號本人（自己的詳細加購 + 結帳結果）
+    """
+    _broadcast_email(products, account_results)
+    if account_results:
+        for acct_email, result in account_results.items():
+            if acct_email in GMAIL_RECIPIENTS:
+                _personal_checkout_email(acct_email, result, products)
+    return True
 
 
 # ─────────────────────────────────────────────
