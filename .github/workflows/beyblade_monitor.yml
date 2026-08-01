@@ -29,24 +29,14 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r beyblade_monitor/requirements.txt
 
-      - name: Get Playwright version
-        id: pw-version
-        run: echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> $GITHUB_OUTPUT
-
-      - name: Cache Playwright browsers
+      - name: Cache Playwright Chromium
         uses: actions/cache@v4
-        id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('beyblade_monitor/requirements.txt') }}
 
-      - name: Install Playwright browsers
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: playwright install chromium --with-deps
-
-      - name: Install Playwright system deps only (cache hit)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: playwright install-deps chromium
+      - name: Install Playwright Chromium
+        run: python -m playwright install chromium --with-deps
 
       # ── 跨 workflow 執行之狀態：seen_products.json ────────────────────────
       # restore-keys 確保永遠能讀到最新的已見商品清單
