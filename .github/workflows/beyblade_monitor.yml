@@ -1,4 +1,4 @@
-name: Beyblade X New Product Monitor
+name: 1999 Monitor
 
 on:
   workflow_dispatch:   # 由 cron-job.org 透過 GitHub API 觸發
@@ -53,7 +53,7 @@ jobs:
           GMAIL_SENDER:     ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD:   ${{ secrets.GMAIL_PASSWORD }}
           GMAIL_RECIPIENTS: ${{ secrets.GMAIL_RECIPIENTS }}
-          CHECK_ROUNDS:     '130'
+          CHECK_ROUNDS:     '190'
           STATE_FILE:       'seen_products.json'
         working-directory: beyblade_monitor
         run: python beyblade_monitor.py
