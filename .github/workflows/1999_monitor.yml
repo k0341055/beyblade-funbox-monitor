@@ -24,16 +24,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-beyblade-${{ runner.os }}
+          key: pip-1999-${{ runner.os }}
 
       - name: Install Python dependencies
-        run: pip install -r beyblade_monitor/requirements.txt
+        run: pip install -r 1999_monitor/requirements.txt
 
       - name: Cache Playwright Chromium
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('beyblade_monitor/requirements.txt') }}
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('1999_monitor/requirements.txt') }}
 
       - name: Install Playwright Chromium
         run: python -m playwright install chromium --with-deps
@@ -43,18 +43,17 @@ jobs:
       - name: Restore seen products state
         uses: actions/cache@v4
         with:
-          path: beyblade_monitor/seen_products.json
-          key: beyblade-seen-${{ github.run_id }}
+          path: 1999_monitor/seen_products.json
+          key: 1999-seen-${{ github.run_id }}
           restore-keys: |
-            beyblade-seen-
+            1999-seen-
 
-      - name: Run Beyblade X monitor (4 rounds)
+      - name: Run 1999 monitor
         env:
           GMAIL_SENDER:     ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD:   ${{ secrets.GMAIL_PASSWORD }}
           GMAIL_RECIPIENTS: ${{ secrets.GMAIL_RECIPIENTS }}
           CHECK_ROUNDS:     '190'
           STATE_FILE:       'seen_products.json'
-        working-directory: beyblade_monitor
-        run: python beyblade_monitor.py
-
+        working-directory: 1999_monitor
+        run: python 1999_monitor.py
