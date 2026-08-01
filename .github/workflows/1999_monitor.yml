@@ -50,10 +50,12 @@ jobs:
 
       - name: Run 1999 monitor
         env:
-          GMAIL_SENDER:     ${{ secrets.GMAIL_SENDER }}
-          GMAIL_PASSWORD:   ${{ secrets.GMAIL_PASSWORD }}
-          GMAIL_RECIPIENTS: ${{ secrets.GMAIL_RECIPIENTS }}
-          CHECK_ROUNDS:     '190'
-          STATE_FILE:       'seen_products.json'
+          GMAIL_SENDER:       ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD:     ${{ secrets.GMAIL_PASSWORD }}
+          GMAIL_RECIPIENTS:   ${{ secrets.GMAIL_RECIPIENTS }}
+          SITE_1999_EMAIL:    ${{ secrets.SITE_1999_EMAIL }}
+          SITE_1999_PASSWORD: ${{ secrets.SITE_1999_PASSWORD }}
+          CHECK_ROUNDS:       '190'
+          STATE_FILE:         'seen_products.json'
         working-directory: 1999_monitor
         run: python 1999_monitor.py
