@@ -117,22 +117,28 @@ def _extract_csrf(html: str) -> str:
 
 def load_state() -> tuple:
     """
-    回傳 (notified, purchased)。
-    notified:  {href: ISO時間戳}        ← 1 小時冷卻用
-    purchased: {href: [帳號email清單]}  ← 一般款已購紀錄
+    回傳 (notified, purchased, attempts)。
+    notified:  {href: ISO時間戳}              ← 1 小時通知冷卻
+    purchased: {href: [帳號email清單]}        ← 已成功結帳
+    attempts:  {href: {帳號email: 次數}}      ← 失敗嘗試次數（≥2 則不再試）
     """
     if STATE_FILE.exists():
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        return data.get("notified", {}), data.get("purchased", {})
-    return {}, {}
+        return (
+            data.get("notified", {}),
+            data.get("purchased", {}),
+            data.get("attempts", {}),
+        )
+    return {}, {}, {}
 
 
-def save_state(notified: dict, purchased: dict):
+def save_state(notified: dict, purchased: dict, attempts: dict):
     STATE_FILE.write_text(
         json.dumps(
             {
                 "notified": notified,
                 "purchased": purchased,
+                "attempts": attempts,
                 "updated": datetime.now(TW_TZ).isoformat(),
             },
             ensure_ascii=False,
@@ -501,13 +507,15 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
 # ─────────────────────────────────────────────
 
 
-def auto_buy_all(products: list, purchased: dict) -> dict:
+def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
     """
     對所有非 APP 商品，以每個帳號平行下單。
 
     purchased: {href: [已成功購買的帳號 email 清單]}
-    - 一般款（非隨機包）：若該帳號已成功購買過，本輪跳過，避免浪費重試
-    - 隨機包：每輪都嘗試（限購較寬，通常每次上架可買 3 個）
+    attempts:  {href: {帳號email: 失敗次數}}
+    - 已成功購買過 → 跳過
+    - 失敗嘗試 ≥ 2 次 → 跳過（第三次看到同一商品不再浪費時間）
+    - 其餘 → 嘗試下單
 
     回傳 {email: {"added": [...hrefs...], "attempted": [...], "checkout": status}}
     """
@@ -525,15 +533,20 @@ def auto_buy_all(products: list, purchased: dict) -> dict:
         non_app = non_app[:MAX_BUY_PRODUCTS]
 
     def _products_for_account(email: str) -> list:
-        """依帳號過濾：一般款已買過則跳過，隨機包每輪都試。"""
+        """
+        已成功購買 → 跳過；失敗嘗試 ≥ 2 → 跳過；其餘都試。
+        一般款與隨機包邏輯相同（第一次成功後就不再重複，失敗兩次後放棄）。
+        """
         result = []
         for p in non_app:
-            if is_random_product(p):
-                result.append(p)
-            elif email not in purchased.get(p["href"], []):
-                result.append(p)
-            else:
-                log.info(f"[{email}] 本商品已購買過，本輪跳過：{p['title']}")
+            href = p["href"]
+            if email in purchased.get(href, []):
+                log.info(f"[{email}] 已成功購買，跳過：{p['title']}")
+                continue
+            if attempts.get(href, {}).get(email, 0) >= 2:
+                log.info(f"[{email}] 已嘗試 2 次失敗，跳過：{p['title']}")
+                continue
+            result.append(p)
         return result
 
     log.info(f"自動購買啟動：{len(non_app)} 件商品 × {len(FUNBOX_ACCOUNTS)} 組帳號")
@@ -701,16 +714,17 @@ def check_once() -> bool:
         now = datetime.now(TW_TZ)
         cutoff = now - NOTIFY_COOLDOWN
 
-        notified, purchased = load_state()
+        notified, purchased, attempts = load_state()
         current_hrefs = {p["href"] for p in products}
 
         # 庫存歸零 → 清除所有紀錄（重新上架視為新品、可重新購買）
-        notified = {h: t for h, t in notified.items() if h in current_hrefs}
-        purchased = {h: accts for h, accts in purchased.items() if h in current_hrefs}
+        notified  = {h: t       for h, t       in notified.items()  if h in current_hrefs}
+        purchased = {h: accts   for h, accts   in purchased.items() if h in current_hrefs}
+        attempts  = {h: acct_cx for h, acct_cx in attempts.items()  if h in current_hrefs}
 
         if not products:
             log.info("目前無庫存商品，繼續監控")
-            save_state(notified, purchased)
+            save_state(notified, purchased, attempts)
             return True
 
         to_notify = [
@@ -720,18 +734,26 @@ def check_once() -> bool:
         ]
 
         if to_notify:
-            account_results = auto_buy_all(to_notify, purchased)
+            account_results = auto_buy_all(to_notify, purchased, attempts)
 
-            # 結帳成功的一般款 → 寫入 purchased，下一輪不再重複下單
             for acct_email, result in account_results.items():
-                if result.get("checkout") == "success":
+                checkout = result.get("checkout", "failed")
+                if checkout == "success":
+                    # 結帳成功 → 記錄已購買（所有加入購物車的商品）
                     for href in result.get("added", []):
-                        p = next((x for x in to_notify if x["href"] == href), None)
-                        if p and not is_random_product(p):
-                            purchased.setdefault(href, [])
-                            if acct_email not in purchased[href]:
-                                purchased[href].append(acct_email)
-                                log.info(f"已記錄購買成功：{acct_email} → {p['title']}")
+                        purchased.setdefault(href, [])
+                        if acct_email not in purchased[href]:
+                            purchased[href].append(acct_email)
+                            p_obj = next((x for x in to_notify if x["href"] == href), None)
+                            log.info(f"已記錄購買成功：{acct_email} → {p_obj['title'] if p_obj else href}")
+                else:
+                    # 結帳失敗或被限購攔截 → 累加失敗嘗試次數（下次仍試，第三次才跳過）
+                    for href in result.get("attempted", []):
+                        if acct_email not in purchased.get(href, []):
+                            attempts.setdefault(href, {})
+                            attempts[href][acct_email] = attempts[href].get(acct_email, 0) + 1
+                            cnt = attempts[href][acct_email]
+                            log.info(f"[{acct_email}] 記錄失敗嘗試 #{cnt}：{href}")
 
             log.info(
                 f"發送通知：{len(to_notify)} 件"
@@ -743,7 +765,7 @@ def check_once() -> bool:
         else:
             log.info(f"所有 {len(products)} 件商品均在 1 小時冷卻期內")
 
-        save_state(notified, purchased)
+        save_state(notified, purchased, attempts)
         return True
 
     except requests.HTTPError as e:
