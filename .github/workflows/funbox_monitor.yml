@@ -43,7 +43,7 @@ jobs:
           restore-keys: |
             funbox-seen-
 
-      - name: Run Funbox monitor (50 rounds)
+      - name: Run Funbox monitor
         env:
           GMAIL_SENDER:      ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD:    ${{ secrets.GMAIL_PASSWORD }}
@@ -54,7 +54,7 @@ jobs:
           FUNBOX_PASSWORD_2: ${{ secrets.FUNBOX_PASSWORD_2 }}
           FUNBOX_EMAIL_3:    ${{ secrets.FUNBOX_EMAIL_3 }}
           FUNBOX_PASSWORD_3: ${{ secrets.FUNBOX_PASSWORD_3 }}
-          CHECK_ROUNDS:      '680'
+          CHECK_ROUNDS:      '820'
           STATE_FILE:        'seen_products.json'
         working-directory: funbox_monitor
         run: python funbox_monitor.py

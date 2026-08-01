@@ -15,7 +15,7 @@ flowchart TD
     CRON -->|workflow_dispatch| GA3["GitHub Actions\neslite_monitor\nubuntu VM"]
 
     GA1 --> PW1["Playwright + Chromium\n190 輪 / 次\n共用瀏覽器"]
-    GA2 --> REQ["requests 登入／加購\n＋ Playwright 結帳\n680 輪 / 次"]
+    GA2 --> REQ["requests 登入／加購\n＋ Playwright 結帳\n820 輪 / 次"]
     GA3 --> PW3["Playwright + Chromium\n300 輪 / 次\n共用瀏覽器"]
 
     PW1 --> SITE1["1999.co.jp\nBeyblade X 頁\nCloudflare 保護"]
@@ -61,7 +61,7 @@ beyblade-funbox-monitor/
 | 偵測商品 | Beyblade X 系列 | 戰鬥陀螺 | Beyblade X 專區 |
 | 反爬蟲 | Cloudflare（需反偵測） | Cyberbiz `/products.json` API | Cloudflare（Playwright 繞過） |
 | 技術架構 | Playwright 全程（async） | requests 登入/加購 + Playwright 結帳 | Playwright 全程（sync，共用瀏覽器） |
-| 每次執行輪數 | 190 輪（間隔 5~8 秒） | 680 輪（間隔 3~5 秒） | 300 輪（間隔 3~5 秒） |
+| 每次執行輪數 | 190 輪（間隔 5~8 秒） | 820 輪（間隔 3~5 秒） | 300 輪（間隔 3~5 秒） |
 | 執行時長 / timeout | 約 60 分鐘 / 62 min | 約 57 分鐘 / 65 min | 約 45 分鐘 / 62 min |
 | 自動下單 | 無 | 有（3 帳號平行） | 無 |
 | 觸發頻率 | 每小時一次 | 每小時一次 | 每小時一次 |
@@ -260,7 +260,7 @@ STATE_FILE=seen_products.json
 | 變數 | 預設值 | 說明 |
 |---|---|---|
 | `SEARCH_URL` | Beyblade 集合 URL | 監控目標（可改為任意 Cyberbiz 集合或單一商品 URL） |
-| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 680） |
+| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 820） |
 | `CART_QTY` | `3` | 每件商品加入購物車數量 |
 | `MAX_BUY_PRODUCTS` | `0`（無限制） | 限制本次最多購買幾件（測試用） |
 | `TEST_MODE` | `0` | 設為 `1` 時 email 主旨加【測試】標注 |
