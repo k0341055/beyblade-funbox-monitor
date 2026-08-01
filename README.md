@@ -16,7 +16,7 @@ flowchart TD
 
     GA1 --> PW1["Playwright + Chromium\n190 輪 / 次\n共用瀏覽器"]
     GA2 --> REQ["requests 登入／加購\n＋ Playwright 結帳\n820 輪 / 次"]
-    GA3 --> PW3["Playwright + Chromium\n300 輪 / 次\n共用瀏覽器"]
+    GA3 --> PW3["Playwright + Chromium\n580 輪 / 次\n共用瀏覽器"]
 
     PW1 --> SITE1["1999.co.jp\nBeyblade X 頁\nCloudflare 保護"]
     REQ --> SITE2["shop.funbox.com.tw\n戰鬥陀螺集合頁\nCyberbiz SPA"]
@@ -61,7 +61,7 @@ beyblade-funbox-monitor/
 | 偵測商品 | Beyblade X 系列 | 戰鬥陀螺 | Beyblade X 專區 |
 | 反爬蟲 | Cloudflare（需反偵測） | Cyberbiz `/products.json` API | Cloudflare（Playwright 繞過） |
 | 技術架構 | Playwright 全程（async） | requests 登入/加購 + Playwright 結帳 | Playwright 全程（sync，共用瀏覽器） |
-| 每次執行輪數 | 190 輪（間隔 5~8 秒） | 820 輪（間隔 3~5 秒） | 300 輪（間隔 3~5 秒） |
+| 每次執行輪數 | 190 輪（間隔 5~8 秒） | 820 輪（間隔 3~5 秒） | 580 輪（間隔 3~5 秒） |
 | 執行時長 / timeout | 約 60 分鐘 / 62 min | 約 57 分鐘 / 65 min | 約 45 分鐘 / 62 min |
 | 自動下單 | 無 | 有（3 帳號平行） | 無 |
 | 觸發頻率 | 每小時一次 | 每小時一次 | 每小時一次 |
@@ -175,7 +175,7 @@ beyblade-funbox-monitor/
 
 ### 效能優化
 
-單次執行僅啟動一次 Chromium，所有 300 輪共用同一個 page：
+單次執行僅啟動一次 Chromium，所有 580 輪共用同一個 page：
 
 ```
 啟動 Chromium（僅一次）
@@ -183,7 +183,7 @@ beyblade-funbox-monitor/
   ├─ 第 1 輪：page.goto(API) + 解析 + 通知（~9 秒）
   ├─ 第 2 輪：page.goto(API) + 解析（~7 秒，省去瀏覽器啟動）
   ├─ ...
-  └─ 第 300 輪
+  └─ 第 580 輪
   │
   └─ 關閉瀏覽器
 ```
@@ -191,7 +191,7 @@ beyblade-funbox-monitor/
 | | 舊版（每輪重啟） | 新版（共用瀏覽器） |
 |---|---|---|
 | 每輪耗時 | ~15 秒 | ~7 秒（第 2 輪起） |
-| 60 分鐘可跑 | ~180 輪 | ~300 輪 |
+| 60 分鐘可跑 | ~180 輪 | ~580 輪 |
 
 ### 略過商品
 
@@ -271,7 +271,7 @@ STATE_FILE=seen_products.json
 |---|---|---|
 | `ESLITE_API_URL` | CU202503-00091 專區 URL | 監控目標（可替換為其他誠品活動頁 API） |
 | `ESLITE_SKIP_KEYWORDS` | `UX-14` | 略過的商品關鍵字，逗號分隔 |
-| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 300） |
+| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 580） |
 
 ```bash
 # Funbox
