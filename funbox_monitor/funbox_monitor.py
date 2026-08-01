@@ -73,6 +73,12 @@ _RANDOM_KEYWORDS = ["隨機強化組", "抽抽包", "RANDOM BOOSTER", "RANDOM"]
 # Playwright 結帳頁若出現以下文字，代表 CYBERBIZ 在結帳層級攔截限購
 _CHECKOUT_LIMIT_TEXTS = ["最多只能購買", "達購買上限", "超過購買限制", "超出限購", "purchase limit"]
 
+
+def is_random_product(p: dict) -> bool:
+    """隨機強化組 / 抽抽包類商品，每輪都嘗試購買（限購較寬，通常 3 個）。"""
+    title = p["title"].upper()
+    return any(k.upper() in title for k in _RANDOM_KEYWORDS)
+
 # ─────────────────────────────────────────────
 # 工具函式
 # ─────────────────────────────────────────────
@@ -105,20 +111,30 @@ def _extract_csrf(html: str) -> str:
 
 
 # ─────────────────────────────────────────────
-# 狀態管理（1 小時冷卻）
+# 狀態管理（1 小時冷卻 + 已購紀錄）
 # ─────────────────────────────────────────────
 
 
-def load_notified() -> dict:
+def load_state() -> tuple:
+    """
+    回傳 (notified, purchased)。
+    notified:  {href: ISO時間戳}        ← 1 小時冷卻用
+    purchased: {href: [帳號email清單]}  ← 一般款已購紀錄
+    """
     if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8")).get("notified", {})
-    return {}
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return data.get("notified", {}), data.get("purchased", {})
+    return {}, {}
 
 
-def save_notified(notified: dict):
+def save_state(notified: dict, purchased: dict):
     STATE_FILE.write_text(
         json.dumps(
-            {"notified": notified, "updated": datetime.now(TW_TZ).isoformat()},
+            {
+                "notified": notified,
+                "purchased": purchased,
+                "updated": datetime.now(TW_TZ).isoformat(),
+            },
             ensure_ascii=False,
             indent=2,
         ),
@@ -485,10 +501,15 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
 # ─────────────────────────────────────────────
 
 
-def auto_buy_all(products: list) -> dict:
+def auto_buy_all(products: list, purchased: dict) -> dict:
     """
     對所有非 APP 商品，以每個帳號平行下單。
-    回傳 {email: {"added": [...hrefs...], "checkout": status}}
+
+    purchased: {href: [已成功購買的帳號 email 清單]}
+    - 一般款（非隨機包）：若該帳號已成功購買過，本輪跳過，避免浪費重試
+    - 隨機包：每輪都嘗試（限購較寬，通常每次上架可買 3 個）
+
+    回傳 {email: {"added": [...hrefs...], "attempted": [...], "checkout": status}}
     """
     if not FUNBOX_ACCOUNTS:
         log.warning("未設定任何 FUNBOX 帳號，跳過自動購買")
@@ -503,25 +524,44 @@ def auto_buy_all(products: list) -> dict:
         log.info(f"MAX_BUY_PRODUCTS={MAX_BUY_PRODUCTS}，僅購買前 {MAX_BUY_PRODUCTS} 件")
         non_app = non_app[:MAX_BUY_PRODUCTS]
 
+    def _products_for_account(email: str) -> list:
+        """依帳號過濾：一般款已買過則跳過，隨機包每輪都試。"""
+        result = []
+        for p in non_app:
+            if is_random_product(p):
+                result.append(p)
+            elif email not in purchased.get(p["href"], []):
+                result.append(p)
+            else:
+                log.info(f"[{email}] 本商品已購買過，本輪跳過：{p['title']}")
+        return result
+
     log.info(f"自動購買啟動：{len(non_app)} 件商品 × {len(FUNBOX_ACCOUNTS)} 組帳號")
 
     results = {}
     if len(FUNBOX_ACCOUNTS) == 1:
         email, pwd = FUNBOX_ACCOUNTS[0]
-        results[email] = _checkout_for_account(email, pwd, non_app)
+        acct_products = _products_for_account(email)
+        if acct_products:
+            results[email] = _checkout_for_account(email, pwd, acct_products)
+        else:
+            log.info(f"[{email}] 本輪無需購買的商品，跳過")
     else:
         with ThreadPoolExecutor(max_workers=len(FUNBOX_ACCOUNTS)) as executor:
-            futures = {
-                executor.submit(_checkout_for_account, email, pwd, non_app): email
-                for email, pwd in FUNBOX_ACCOUNTS
-            }
+            futures = {}
+            for email, pwd in FUNBOX_ACCOUNTS:
+                acct_products = _products_for_account(email)
+                if acct_products:
+                    futures[executor.submit(_checkout_for_account, email, pwd, acct_products)] = email
+                else:
+                    log.info(f"[{email}] 本輪無需購買的商品，跳過")
             for future in as_completed(futures):
                 email = futures[future]
                 try:
                     results[email] = future.result()
                 except Exception as e:
                     log.error(f"[{email}] 執行緒例外：{e}")
-                    results[email] = {"added": [], "checkout": "failed"}
+                    results[email] = {"added": [], "attempted": [], "checkout": "failed"}
     return results
 
 
@@ -661,15 +701,16 @@ def check_once() -> bool:
         now = datetime.now(TW_TZ)
         cutoff = now - NOTIFY_COOLDOWN
 
-        # 只保留「目前仍有庫存」的通知記錄；庫存歸零的商品立刻從 seen_products 移除，
-        # 確保下次重新上架時不受 1 小時冷卻限制，馬上觸發通知。
-        notified = load_notified()
+        notified, purchased = load_state()
         current_hrefs = {p["href"] for p in products}
+
+        # 庫存歸零 → 清除所有紀錄（重新上架視為新品、可重新購買）
         notified = {h: t for h, t in notified.items() if h in current_hrefs}
+        purchased = {h: accts for h, accts in purchased.items() if h in current_hrefs}
 
         if not products:
             log.info("目前無庫存商品，繼續監控")
-            save_notified(notified)  # 清空過時條目
+            save_state(notified, purchased)
             return True
 
         to_notify = [
@@ -679,7 +720,19 @@ def check_once() -> bool:
         ]
 
         if to_notify:
-            account_results = auto_buy_all(to_notify)
+            account_results = auto_buy_all(to_notify, purchased)
+
+            # 結帳成功的一般款 → 寫入 purchased，下一輪不再重複下單
+            for acct_email, result in account_results.items():
+                if result.get("checkout") == "success":
+                    for href in result.get("added", []):
+                        p = next((x for x in to_notify if x["href"] == href), None)
+                        if p and not is_random_product(p):
+                            purchased.setdefault(href, [])
+                            if acct_email not in purchased[href]:
+                                purchased[href].append(acct_email)
+                                log.info(f"已記錄購買成功：{acct_email} → {p['title']}")
+
             log.info(
                 f"發送通知：{len(to_notify)} 件"
                 f"（共 {len(products)} 件，跳過 {len(products) - len(to_notify)} 件冷卻中）"
@@ -690,7 +743,7 @@ def check_once() -> bool:
         else:
             log.info(f"所有 {len(products)} 件商品均在 1 小時冷卻期內")
 
-        save_notified(notified)
+        save_state(notified, purchased)
         return True
 
     except requests.HTTPError as e:
