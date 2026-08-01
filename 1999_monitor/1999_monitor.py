@@ -27,9 +27,10 @@ load_dotenv()
 # 設定區
 # ─────────────────────────────────────────────
 
-SEARCH_URL = (
+SEARCH_URL = os.environ.get(
+    "SEARCH_URL",
     "https://www.1999.co.jp/search"
-    "?typ1_c=100&cat=&searchkey=beyblade+X&sortid=7&soldout=0"
+    "?typ1_c=100&cat=&searchkey=beyblade+X&sortid=7&soldout=0",
 )
 BASE_URL = "https://www.1999.co.jp"
 CHECKOUT_URL = "https://www.1999.co.jp/order"
