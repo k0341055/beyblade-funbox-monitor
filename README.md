@@ -1,4 +1,4 @@
-# Beyblade X & Funbox & 誠品 商品偵測器
+# 1999 X & Funbox & 誠品 商品偵測器
 
 自動偵測三個電商的 Beyblade X 商品庫存，Funbox 偵測到有庫存時同時自動登入下單，並透過 Gmail 發送通知。每小時由 cron-job.org 觸發一次 GitHub Actions，每次執行持續監控約 60 分鐘。
 
