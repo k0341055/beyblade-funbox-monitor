@@ -67,6 +67,12 @@ _UA = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+# 隨機強化組 / 抽抽包關鍵字（這類商品通常限購 3，其他一般款限購 1）
+_RANDOM_KEYWORDS = ["隨機強化組", "抽抽包", "RANDOM BOOSTER", "RANDOM"]
+
+# Playwright 結帳頁若出現以下文字，代表 CYBERBIZ 在結帳層級攔截限購
+_CHECKOUT_LIMIT_TEXTS = ["最多只能購買", "達購買上限", "超過購買限制", "超出限購", "purchase limit"]
+
 # ─────────────────────────────────────────────
 # 工具函式
 # ─────────────────────────────────────────────
@@ -172,6 +178,43 @@ def fetch_products() -> list:
 
 
 # ─────────────────────────────────────────────
+# 智慧加購數量決策
+# ─────────────────────────────────────────────
+
+
+def get_target_qty(p: dict) -> int:
+    """
+    根據商品資訊決定加入購物車的目標數量。
+
+    優先順序：
+    1. API 回傳 qc（每筆訂單上限）→ 最優先，直接 min(CART_QTY, 庫存, qc)
+    2. 商品名含隨機強化組 / 抽抽包關鍵字 → 限購通常 3，允許買 3
+    3. 其他一般戰鬥陀螺 → 麗嬰/Funbox 實際限購規則多為每款 1，保守預設 1
+
+    CYBERBIZ 的「會員累計限購」可能在結帳才檢查，qc=null 不代表真的不限購，
+    因此一般款採保守策略，優先確保訂單成立，而非搶加最多。
+    """
+    inventory = p["inventory"]
+    qty_cap = p.get("qty_cap")
+    title = p["title"].upper()
+
+    if qty_cap is not None:
+        qty = max(1, min(CART_QTY, inventory, qty_cap))
+        log.info(f"  數量決策：API qc={qty_cap} → {qty} 件")
+        return qty
+
+    if any(k.upper() in title for k in _RANDOM_KEYWORDS):
+        qty = min(3, inventory)
+        log.info(f"  數量決策：隨機強化組/抽抽包 → {qty} 件")
+        return qty
+
+    # 一般陀螺保守預設 1（符合麗嬰 1/1/3 限購政策）
+    qty = min(1, inventory)
+    log.info(f"  數量決策：一般陀螺保守 → {qty} 件")
+    return qty
+
+
+# ─────────────────────────────────────────────
 # 登入 + 加入購物車（requests）
 # ─────────────────────────────────────────────
 
@@ -210,8 +253,7 @@ def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
         attempted = []
         for p in products:
             vid = p["variant_id"]
-            qty_cap = p.get("qty_cap")
-            target_qty = min(CART_QTY, p["inventory"], qty_cap) if qty_cap else min(CART_QTY, p["inventory"])
+            target_qty = get_target_qty(p)
             attempted.append(p["href"])
 
             r2 = sess.post(
@@ -220,22 +262,32 @@ def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
                 headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
                 timeout=10,
             )
-            if r2.status_code in (200, 409):
+            if r2.status_code == 200:
                 log.info(f"[{email}] 加入購物車：{p['title']} x{target_qty}")
                 added.append(p["href"])
             else:
-                # 限購或其他原因，退而求其次加 1 個
-                r3 = sess.post(
-                    f"{BASE_URL}/cart/add",
-                    data={"id": vid, "quantity": 1},
-                    headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
-                    timeout=10,
+                # 409 / 其他非 200 → 視為加購失敗，降量至 1 重試
+                log.warning(
+                    f"[{email}] 加購 x{target_qty} 失敗：{p['title']} "
+                    f"| HTTP {r2.status_code} | {r2.text[:200]}"
                 )
-                if r3.status_code in (200, 409):
-                    log.info(f"[{email}] 加入購物車：{p['title']} x1（受限）")
-                    added.append(p["href"])
+                if target_qty > 1:
+                    r3 = sess.post(
+                        f"{BASE_URL}/cart/add",
+                        data={"id": vid, "quantity": 1},
+                        headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
+                        timeout=10,
+                    )
+                    if r3.status_code == 200:
+                        log.info(f"[{email}] 加入購物車：{p['title']} x1（降量重試成功）")
+                        added.append(p["href"])
+                    else:
+                        log.error(
+                            f"[{email}] x1 仍加入失敗：{p['title']} "
+                            f"| HTTP {r3.status_code} | {r3.text[:200]}"
+                        )
                 else:
-                    log.error(f"[{email}] 無法加入購物車：{p['title']} (HTTP {r3.status_code})")
+                    log.error(f"[{email}] 無法加入購物車：{p['title']} (HTTP {r2.status_code})")
 
         if not added:
             log.error(f"[{email}] 所有商品均加入失敗")
@@ -395,6 +447,15 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
                     log.warning(f"[{email}] 觸發非預期 3DS：{url}")
                     br.close()
                     return "3ds_pending"
+                # CYBERBIZ 在結帳層級才顯示的限購錯誤（URL 不會變，需掃描頁面文字）
+                try:
+                    body_text = page.locator("body").inner_text(timeout=500)
+                    if any(kw in body_text for kw in _CHECKOUT_LIMIT_TEXTS):
+                        log.warning(f"[{email}] 結帳被限購攔截（頁面偵測）：{body_text[:300]}")
+                        br.close()
+                        return "checkout_limited"
+                except Exception:
+                    pass
 
             log.warning(f"[{email}] 結帳後停在：{page.url}")
             br.close()
@@ -469,11 +530,12 @@ def auto_buy_all(products: list) -> dict:
 # ─────────────────────────────────────────────
 
 _CHECKOUT_LABEL = {
-    "success":        "✅ 已自動結帳完成",
-    "payment_failed": "❌ 訂單已建立但付款失敗（show_failed），請手動完成付款",
-    "3ds_pending":    "⚠ 訂單已建立（需完成銀行 3DS 驗證才能付款）",
-    "cart":           "🛒 商品已在購物車，請手動完成結帳",
-    "failed":         "❌ 自動購買失敗，請手動下單",
+    "success":          "✅ 已自動結帳完成",
+    "payment_failed":   "❌ 訂單已建立但付款失敗（show_failed），請手動完成付款",
+    "3ds_pending":      "⚠ 訂單已建立（需完成銀行 3DS 驗證才能付款）",
+    "checkout_limited": "🚫 結帳時被 CYBERBIZ 限購攔截，請手動調整數量後結帳",
+    "cart":             "🛒 商品已在購物車，請手動完成結帳",
+    "failed":           "❌ 自動購買失敗，請手動下單",
 }
 
 
@@ -499,7 +561,8 @@ def notify_products(products: list, account_results: dict = None) -> bool:
         lines.append(f"價格：{p['price']}")
         lines.append(f"庫存：{p['inventory']} 件")
         cap = p.get("qty_cap")
-        lines.append(f"下單上限：{'無限制' if cap is None else f'{cap} 件/筆'}")
+        lines.append(f"API 限購：{'無限制' if cap is None else f'{cap} 件/筆'}")
+        lines.append(f"實際加購：{get_target_qty(p)} 件/帳號")
         lines.append(f"商品連結：{p['url']}")
 
         if "APP" in p["title"].upper():
@@ -602,9 +665,14 @@ def check_once() -> bool:
 def main():
     log.info(f"Funbox 商品偵測器 | 輪數：{CHECK_ROUNDS} | 帳號數：{len(FUNBOX_ACCOUNTS)}")
     for round_num in range(1, CHECK_ROUNDS + 1):
-        if CHECK_ROUNDS > 1:
-            log.info(f"── 第 {round_num}/{CHECK_ROUNDS} 輪 ──")
-        check_once()
+        try:
+            if CHECK_ROUNDS > 1:
+                log.info(f"── 第 {round_num}/{CHECK_ROUNDS} 輪 ──")
+            check_once()
+        except Exception as error:
+            log.error(
+                f"第 {round_num}/{CHECK_ROUNDS} 輪執行失敗：{error}"
+            )
         if round_num < CHECK_ROUNDS:
             wait = random.randint(3, 5)
             log.info(f"等待 {wait} 秒後進行下一輪...")
