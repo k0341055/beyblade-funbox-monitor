@@ -554,19 +554,27 @@ def checkout(page):
         page.get_by_title("誠品門市取貨").click()
         page.wait_for_timeout(1500)
 
-        # 選取縣市
+        # 選完取貨方式後往下滑，讓縣市/門市下拉選單進入視窗
+        page.evaluate("window.scrollBy(0, 400)")
+        page.wait_for_timeout(1000)
+
+        # 等縣市下拉選單出現後再選
         try:
+            page.wait_for_selector(
+                "select[name='recipientCity'], select[name*='city']",
+                timeout=8000,
+            )
             city_select = (
                 page.locator("select[name='recipientCity']").first or
-                page.locator("select[name*='city']").first or
-                page.get_by_role("combobox").nth(2)
+                page.locator("select[name*='city']").first
             )
             city_select.select_option(CHECKOUT_CITY)
         except Exception:
             page.get_by_role("combobox").nth(2).select_option(CHECKOUT_CITY)
         page.wait_for_timeout(1000)
 
-        # 選取門市
+        # 等門市下拉選單更新後選取
+        page.wait_for_selector("select[name='recipientEsliteStore']", timeout=8000)
         page.locator("select[name='recipientEsliteStore']").select_option(CHECKOUT_STORE_CODE)
         page.wait_for_timeout(1000)
 
