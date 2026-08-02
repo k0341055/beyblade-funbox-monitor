@@ -267,7 +267,7 @@ EsliteMonitorBase (ABC)
 | `order_qty_limit` | 每單購買上限（`null` = 無限制） |
 | `product_button_status` | `add_to_shopping_cart` 表示可購買 |
 
-略過名稱含 `ESLITE_SKIP_KEYWORDS`（預設 `UX-14`）的商品。
+庫存判斷：`stock > 0`（書展 API）或 `product_button_status == "add_to_shopping_cart"`（個別商品 API）。部分陳列商品（如 UX-14）雖然出現在書展 API 中，但 `stock = 0`，會被庫存過濾自然排除，無需另設關鍵字黑名單。
 
 ### 通知邏輯（無冷卻）
 
@@ -459,7 +459,6 @@ AUTO_CHECKOUT=true
 | `MONITOR_MODE` | `exhibition` | `exhibition`（書展 API）或 `product`（個別商品 GUID） |
 | `ESLITE_API_URL` | CU202503-00091 展覽 API | ExhibitionMonitor 監控目標（可替換為其他誠品活動頁 API） |
 | `ESLITE_EXTRA_PRODUCTS` | `10022136782683190211005` | ProductMonitor 追蹤的商品 GUID，逗號分隔 |
-| `ESLITE_SKIP_KEYWORDS` | `UX-14` | 略過的商品名稱關鍵字，逗號分隔 |
 | `CHECK_ROUNDS` | `1` | 執行輪數（書展與個別商品皆為 580） |
 | `CHECKOUT_MAX` | `3` | 每次最多加入購物車的商品件數 |
 | `AUTO_CHECKOUT` | `true` | 設為 `false` 可停用自動下單（僅通知） |

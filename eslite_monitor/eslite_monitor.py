@@ -61,11 +61,6 @@ class EsliteMonitorBase(ABC):
             if g.strip()
         ]
         self.CHECK_ROUNDS = int(os.environ.get("CHECK_ROUNDS", "1"))
-        self.SKIP_KEYWORDS = [
-            kw.strip()
-            for kw in os.environ.get("ESLITE_SKIP_KEYWORDS", "UX-14").split(",")
-            if kw.strip()
-        ]
 
         self.GMAIL_SENDER     = os.environ["GMAIL_SENDER"]
         self.GMAIL_PASSWORD   = os.environ["GMAIL_PASSWORD"]
@@ -589,7 +584,6 @@ class EsliteMonitorBase(ABC):
     def run(self):
         log.info(
             f"{self.__class__.__name__} | 輪數：{self.CHECK_ROUNDS}"
-            f" | 略過關鍵字：{self.SKIP_KEYWORDS}"
             f" | 自動下單：{'啟用' if self.AUTO_CHECKOUT else '停用'}"
         )
 
@@ -701,9 +695,6 @@ class ExhibitionMonitor(EsliteMonitorBase):
         for guid, p in all_products.items():
             name  = p["name"]
             stock = p["stock"]
-            if any(kw.upper() in name.upper() for kw in self.SKIP_KEYWORDS):
-                log.info(f"略過：{name}")
-                continue
             if not stock or stock <= 0:
                 continue
             lim = f"帳號上限:{p['account_qty_limit']}件" if p.get("account_qty_limit") else "無限購"
