@@ -2,6 +2,13 @@
 
 自動偵測三個電商的 Beyblade X 商品庫存，並在有庫存時透過 Gmail 發送通知。Funbox 與誠品支援自動下單。每小時由 cron-job.org 觸發一次 GitHub Actions，每次執行持續監控約 45~60 分鐘。
 
+### 術語定義
+
+| 術語 | 說明 |
+|---|---|
+| **Run（執行）** | cron-job.org 每小時觸發一次 GitHub Actions，啟動一個 ubuntu VM，執行整個監控程式直到結束。每次 run 約 58 分鐘，結束後 VM 銷毀，所有記憶體狀態清空。 |
+| **Round（輪）** | Run 內的一次偵測循環：呼叫 API → 解析庫存 → 通知／下單。每輪約 6 秒，一個 run 包含 580 輪。 |
+
 ---
 
 ## 架構圖
@@ -329,8 +336,10 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
 
 `eslite_order_state.json` 只記錄**自動結帳成功**的商品 guid（永久去重）。
 
-同一次執行（run）內，已加入購物車的 guid 記錄在記憶體（`_cart_added_guids`），不持久化——這樣若誠品因庫存歸零自動清空購物車，下次 run 開始時記憶體重置，程式可以重新偵測並加入。
+同一個 **run** 內，已加入購物車的 guid 記錄在記憶體（`_cart_added_guids`）：同一 run 後續的 **round** 遇到該 guid 會直接跳過，不清空購物車。Run 結束後 VM 銷毀，記憶體重置——下一個 run（下一小時）若商品仍有庫存且尚未成功下單，程式會重新嘗試加入購物車。
 
+> 若誠品因庫存歸零自動清空購物車，下一個 run 偵測到有新庫存即可重新加入，不受影響。
+>
 > 若想讓程式重新嘗試已成功下單的商品，刪除 `eslite_order_state.json` 中對應的條目即可。
 
 ### Email 通知格式
@@ -345,16 +354,16 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
 ### Session 持久化（跨 VM 關鍵）
 
 ```
-每次 run 開始
+每次 run（GitHub Actions 執行）開始
   ├─ 優先：Actions cache 還原 eslite_storage_state.json
   │         (key: eslite-session-{run_id}，restore-keys: eslite-session-)
   └─ 備援：若 cache miss → 從 ESLITE_STORAGE_STATE_B64 secret base64 解碼
 
-程式執行結束
+580 輪（rounds）全部完成後
   └─ ctx.storage_state() 儲存最新 cookies（包含信任裝置 cookie）
 
-每次 run 結束後
-  └─ Actions cache 自動儲存（供下次 run 使用）
+每次 run 結束時
+  └─ Actions cache 自動儲存（供下一個 run 使用）
 ```
 
 Session 存活時間：信任裝置 cookie 約 30~90 天，但由於腳本每小時執行並刷新 cookies，**只要連續正常執行 session 就不會過期**。
