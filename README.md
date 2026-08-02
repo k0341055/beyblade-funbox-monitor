@@ -13,18 +13,22 @@ flowchart TD
     CRON -->|workflow_dispatch| GA1["GitHub Actions\n1999_monitor\nubuntu VM"]
     CRON -->|workflow_dispatch| GA2["GitHub Actions\nfunbox_monitor\nubuntu VM"]
     CRON -->|workflow_dispatch| GA3["GitHub Actions\neslite_monitor\nubuntu VM"]
+    CRON -->|workflow_dispatch| GA4["GitHub Actions\neslite_product_monitor\nubuntu VM"]
 
     GA1 --> PW1["Playwright async\n190 輪 / 次\n隨機 UA + viewport"]
     GA2 --> REQ["requests 登入/加購\n+ Playwright 結帳\n820 輪 / 次"]
-    GA3 --> PW3["Playwright sync\n580 輪 / 次\n共用瀏覽器 + session"]
+    GA3 --> PW3["ExhibitionMonitor\nPlaywright sync\n580 輪 / 次\n共用瀏覽器 + session"]
+    GA4 --> PW4["ProductMonitor\nPlaywright sync\n500 輪 / 次\n共用瀏覽器 + session"]
 
     PW1 --> SITE1["1999.co.jp\nBeyblade X 搜尋頁\nCloudflare 保護"]
     REQ --> SITE2["shop.funbox.com.tw\nCyberbiz /products.json API"]
     PW3 --> SITE3["athena.eslite.com\nbook_exhibits API\nCloudflare 保護"]
+    PW4 --> SITE4["athena.eslite.com\nproducts/{guid} API\n個別商品庫存"]
 
     SITE1 --> COOL1["1 小時冷卻\nseen_products.json"]
     SITE2 --> COOL2["1 小時冷卻\nseen_products.json"]
     SITE3 --> NOCD["無冷卻\n每輪有庫存即通知"]
+    SITE4 --> NOCD
 
     COOL1 -->|新商品 / 到期| MAIL1["Gmail → 全體收件人"]
     COOL2 -->|新商品 / 到期| MAIL2["Gmail → 全體收件人"]
@@ -45,9 +49,10 @@ flowchart TD
 beyblade-funbox-monitor/
 ├── .github/
 │   └── workflows/
-│       ├── 1999_monitor.yml        # 1999.co.jp workflow
-│       ├── funbox_monitor.yml      # Funbox 戰鬥陀螺 workflow
-│       └── eslite_monitor.yml      # 誠品 Beyblade X workflow
+│       ├── 1999_monitor.yml              # 1999.co.jp workflow
+│       ├── funbox_monitor.yml            # Funbox 戰鬥陀螺 workflow
+│       ├── eslite_monitor.yml            # 誠品書展監控 workflow（MONITOR_MODE=exhibition）
+│       └── eslite_product_monitor.yml    # 誠品個別商品監控 workflow（MONITOR_MODE=product）
 ├── 1999_monitor/
 │   ├── 1999_monitor.py             # 主程式（Playwright async，僅通知）
 │   └── requirements.txt
@@ -55,7 +60,7 @@ beyblade-funbox-monitor/
 │   ├── funbox_monitor.py           # 主程式（requests + Playwright 混合）
 │   └── requirements.txt
 └── eslite_monitor/
-    ├── eslite_monitor.py           # 主程式（Playwright sync，自動下單）
+    ├── eslite_monitor.py           # 主程式（OOP，MONITOR_MODE 切換兩種監控）
     ├── generate_session.py         # 一次性工具：本機手動登入並儲存 session
     └── requirements.txt
 ```
@@ -64,17 +69,17 @@ beyblade-funbox-monitor/
 
 ## 三個監控器比較
 
-| | 1999 | Funbox | 誠品 (Eslite) |
-|---|---|---|---|
-| 目標網站 | `1999.co.jp` | `shop.funbox.com.tw` | `eslite.com` |
-| 偵測商品 | Beyblade X 系列 | 戰鬥陀螺集合頁 | Beyblade X 專區 |
-| 反爬蟲機制 | Cloudflare（隨機 UA/viewport/locale） | Cyberbiz `/products.json`（無反爬） | Cloudflare（Playwright 繞過） |
-| 技術架構 | Playwright async | requests 登入/加購 + Playwright 結帳 | Playwright sync（共用瀏覽器） |
-| 每次執行輪數 | 190 輪（間隔 5~8 秒） | 820 輪（間隔 3~5 秒） | 380 輪（間隔 3~5 秒） |
-| 執行時長 / timeout | ~20 分鐘 / 62 min | ~57 分鐘 / 65 min | ~55 分鐘 / 65 min |
-| 通知冷卻 | 1 小時冷卻 | 1 小時冷卻 | **無冷卻（每輪有庫存即通知）** |
-| 自動下單 | 無（1999 結帳需 reCAPTCHA） | **有**（3 帳號平行，7-11 貨到付款） | **有**（加入購物車 + 自動結帳） |
-| 觸發頻率 | 每小時一次 | 每小時一次 | 每小時一次 |
+| | 1999 | Funbox | 誠品書展 | 誠品個別商品 |
+|---|---|---|---|---|
+| 目標網站 | `1999.co.jp` | `shop.funbox.com.tw` | `eslite.com` | `eslite.com` |
+| 偵測商品 | Beyblade X 系列 | 戰鬥陀螺集合頁 | Beyblade X 書展 API | `ESLITE_EXTRA_PRODUCTS` GUID 清單 |
+| 反爬蟲機制 | Cloudflare（隨機 UA/viewport/locale） | Cyberbiz `/products.json`（無反爬） | Cloudflare（Playwright 繞過） | Cloudflare（Playwright 繞過） |
+| 技術架構 | Playwright async | requests 登入/加購 + Playwright 結帳 | `ExhibitionMonitor`（OOP，Playwright sync） | `ProductMonitor`（OOP，Playwright sync） |
+| 每次執行輪數 | 190 輪（間隔 5~8 秒） | 820 輪（間隔 3~5 秒） | 580 輪（間隔 3~5 秒） | 500 輪（間隔 3~5 秒） |
+| 執行時長 / timeout | ~20 分鐘 / 62 min | ~57 分鐘 / 65 min | ~58 分鐘 / 65 min | ~58 分鐘 / 65 min |
+| 通知冷卻 | 1 小時冷卻 | 1 小時冷卻 | **無冷卻（每輪有庫存即通知）** | **無冷卻（每輪有庫存即通知）** |
+| 自動下單 | 無（1999 結帳需 reCAPTCHA） | **有**（3 帳號平行，7-11 貨到付款） | **有**（加入購物車 + 自動結帳） | **有**（加入購物車 + 自動結帳） |
+| 觸發頻率 | 每小時一次 | 每小時一次 | 每小時一次 | 每小時一次（獨立 cron-job） |
 
 ---
 
@@ -219,15 +224,39 @@ beyblade-funbox-monitor/
 
 ## 誠品監控器功能
 
-### 偵測邏輯（兩個來源）
+### OOP 架構
 
-**來源 A：展覽 API（主要）**
+`eslite_monitor.py` 採用 OOP 繼承設計，由環境變數 `MONITOR_MODE` 決定執行哪個子類別：
 
-使用 Playwright 開啟 `athena.eslite.com/api/v1/book_exhibits/{EXHIBITION_ID}`（繞過 Cloudflare），對 JSON 回應進行**遞迴解析**，不限巢狀深度找出所有含 `product_guid` + `name` 的節點。
+```
+EsliteMonitorBase (ABC)
+  ├─ 共用：登入、購物車、結帳、Email 通知、session 持久化、下單去重
+  │
+  ├─ ExhibitionMonitor（MONITOR_MODE=exhibition，預設）
+  │     └─ 呼叫 book_exhibits API → 遞迴解析書展 JSON → ~6 秒/輪 → 580 輪/次
+  │
+  └─ ProductMonitor（MONITOR_MODE=product）
+        └─ 逐一呼叫 products/{guid} API → ~7 秒/輪 → 500 輪/次
+```
 
-**來源 B：個別追蹤（`ESLITE_EXTRA_PRODUCTS`）**
+兩個模式分別由獨立 GitHub Actions workflow 觸發，各使用獨立的 `ORDER_STATE_FILE`（避免下單狀態互相干擾）：
 
-對 `ESLITE_EXTRA_PRODUCTS` 列出的 GUID，逐一呼叫 `athena.eslite.com/api/v1/products/{guid}` 查詢庫存狀態，已在展覽清單中的不重複查詢。
+| Workflow | MONITOR_MODE | CHECK_ROUNDS | ORDER_STATE_FILE |
+|---|---|---|---|
+| `eslite_monitor.yml` | `exhibition` | 580 | `eslite_order_state.json` |
+| `eslite_product_monitor.yml` | `product` | 500 | `eslite_product_order_state.json` |
+
+兩個 workflow 共用同一個 `eslite_storage_state.json`（session），以 `eslite-session-` cache key 共享。
+
+### 偵測邏輯
+
+**ExhibitionMonitor（書展 API）**
+
+使用 Playwright 開啟 `athena.eslite.com/api/v1/book_exhibits/{EXHIBITION_ID}`（繞過 Cloudflare），對 JSON 回應進行**遞迴解析**，不限巢狀深度找出所有含 `product_guid` + `name` 的節點。每輪只呼叫一次 API，約 6 秒。
+
+**ProductMonitor（個別商品）**
+
+對 `ESLITE_EXTRA_PRODUCTS` 列出的 GUID，逐一呼叫 `athena.eslite.com/api/v1/products/{guid}` 查詢庫存狀態。
 
 解析欄位：
 
@@ -246,12 +275,14 @@ beyblade-funbox-monitor/
 
 ### 效能優化
 
-單次執行僅啟動一次 Chromium，所有 380 輪共用同一個 page：
+單次執行僅啟動一次 Chromium，全部輪次共用同一個 page：
 
-| | 舊版（每輪重啟） | 現版（共用瀏覽器） |
-|---|---|---|
-| 每輪耗時 | ~15 秒 | ~8.9 秒（實測） |
-| 60 分鐘可跑 | ~180 輪 | ~380 輪 |
+| | 舊版（含個別追蹤，混用） | ExhibitionMonitor | ProductMonitor |
+|---|---|---|---|
+| 每輪耗時 | ~9.4 秒（實測） | ~6 秒 | ~7 秒 |
+| 60 分鐘可跑 | ~380 輪 | ~580 輪 | ~500 輪 |
+
+OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒。
 
 ### 自動下單流程
 
@@ -352,6 +383,7 @@ gh secret set ESLITE_STORAGE_STATE_B64 \
 | `ORDER_RECIPIENT` | 誠品 | 下單/購物車通知收件人（逗號分隔） |
 | `CHECKOUT_CITY` | 誠品 | 取貨城市（如 `新竹市`） |
 | `CHECKOUT_STORE_CODE` | 誠品 | 門市代碼（如 `B060` 巨城） |
+| `ESLITE_EXTRA_PRODUCTS` | 誠品個別商品 | 要追蹤的商品 GUID，逗號分隔（ProductMonitor 使用） |
 | `ESLITE_STORAGE_STATE_B64` | 誠品 | Session 備援（base64 編碼的 storage_state.json） |
 
 > 設定路徑：GitHub Repo → Settings → Secrets and variables → Actions → New repository secret
@@ -424,15 +456,16 @@ AUTO_CHECKOUT=true
 
 | 變數 | 預設值 | 說明 |
 |---|---|---|
-| `ESLITE_API_URL` | CU202503-00091 展覽 API | 監控目標（可替換為其他誠品活動頁 API） |
-| `ESLITE_EXTRA_PRODUCTS` | `10022136782683190211005` | 額外個別追蹤的商品 GUID，逗號分隔 |
+| `MONITOR_MODE` | `exhibition` | `exhibition`（書展 API）或 `product`（個別商品 GUID） |
+| `ESLITE_API_URL` | CU202503-00091 展覽 API | ExhibitionMonitor 監控目標（可替換為其他誠品活動頁 API） |
+| `ESLITE_EXTRA_PRODUCTS` | `10022136782683190211005` | ProductMonitor 追蹤的商品 GUID，逗號分隔 |
 | `ESLITE_SKIP_KEYWORDS` | `UX-14` | 略過的商品名稱關鍵字，逗號分隔 |
-| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 580） |
+| `CHECK_ROUNDS` | `1` | 執行輪數（書展 580，個別商品 500） |
 | `CHECKOUT_MAX` | `3` | 每次最多加入購物車的商品件數 |
 | `AUTO_CHECKOUT` | `true` | 設為 `false` 可停用自動下單（僅通知） |
 | `HEADLESS` | `true` | 設為 `false` 可在本機手動完成 reCAPTCHA |
-| `ORDER_STATE_FILE` | `eslite_order_state.json` | 下單去重狀態檔路徑 |
-| `STORAGE_STATE_FILE` | `eslite_storage_state.json` | Session cookies 存放路徑 |
+| `ORDER_STATE_FILE` | `eslite_order_state.json` | 下單去重狀態檔路徑（兩個 workflow 使用不同檔名） |
+| `STORAGE_STATE_FILE` | `eslite_storage_state.json` | Session cookies 存放路徑（兩個 workflow 共用） |
 
 ### 本機執行
 
@@ -481,15 +514,24 @@ python eslite_monitor.py
 
 ### 誠品：下單狀態 + Session
 
+兩個 workflow 使用**不同 `ORDER_STATE_FILE`** 避免互相干擾，但共用同一個 session cache：
+
 ```yaml
-# 下單去重（永久）
+# 書展下單去重（永久，key: eslite-order-）
 - uses: actions/cache@v4
   with:
     path: eslite_monitor/eslite_order_state.json
     key: eslite-order-${{ github.run_id }}
     restore-keys: eslite-order-
 
-# Session（優先 cache，cache miss 時從 secret 解碼）
+# 個別商品下單去重（永久，key: eslite-product-order-）
+- uses: actions/cache@v4
+  with:
+    path: eslite_monitor/eslite_product_order_state.json
+    key: eslite-product-order-${{ github.run_id }}
+    restore-keys: eslite-product-order-
+
+# Session（兩個 workflow 共用，key: eslite-session-）
 - uses: actions/cache@v4
   id: session-cache
   with:
@@ -512,12 +554,13 @@ python eslite_monitor.py
 
 ## 觸發方式
 
-由 **cron-job.org** 每小時呼叫 GitHub API，三個監控各建一個獨立任務：
+由 **cron-job.org** 每小時呼叫 GitHub API，四個監控各建一個獨立任務：
 
 ```
 POST https://api.github.com/repos/k0341055/beyblade-funbox-monitor/actions/workflows/1999_monitor.yml/dispatches
 POST https://api.github.com/repos/k0341055/beyblade-funbox-monitor/actions/workflows/funbox_monitor.yml/dispatches
 POST https://api.github.com/repos/k0341055/beyblade-funbox-monitor/actions/workflows/eslite_monitor.yml/dispatches
+POST https://api.github.com/repos/k0341055/beyblade-funbox-monitor/actions/workflows/eslite_product_monitor.yml/dispatches
 ```
 
 Request Headers：

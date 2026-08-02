@@ -1,4 +1,4 @@
-name: 誠品 Beyblade X Monitor
+name: 誠品 Beyblade X 個別商品監控
 
 on:
   workflow_dispatch:   # 由 cron-job.org 透過 GitHub API 觸發
@@ -39,13 +39,12 @@ jobs:
       - name: Restore order state
         uses: actions/cache@v4
         with:
-          path: eslite_monitor/eslite_order_state.json
-          key: eslite-order-${{ github.run_id }}
+          path: eslite_monitor/eslite_product_order_state.json
+          key: eslite-product-order-${{ github.run_id }}
           restore-keys: |
-            eslite-order-
+            eslite-product-order-
 
       # ── Session 狀態（信任裝置 cookies，避免每次觸發簡訊驗證） ────────
-      # 優先從 cache 讀取（較新），cache miss 時從 secret 解碼（備援）
       - name: Restore session state from cache
         uses: actions/cache@v4
         id: session-cache
@@ -65,22 +64,23 @@ jobs:
             echo "已從 secret 還原 session 狀態"
           fi
 
-      - name: Run Eslite monitor
+      - name: Run Eslite product monitor
         env:
           GMAIL_SENDER:         ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD:       ${{ secrets.GMAIL_PASSWORD }}
           GMAIL_RECIPIENTS:     ${{ secrets.GMAIL_RECIPIENTS }}
           ESLITE_ACCOUNT:       ${{ secrets.ESLITE_ACCOUNT }}
           ESLITE_PASSWORD:      ${{ secrets.ESLITE_PASSWORD }}
+          ESLITE_EXTRA_PRODUCTS: ${{ secrets.ESLITE_EXTRA_PRODUCTS }}
           ORDER_RECIPIENT:      ${{ secrets.ORDER_RECIPIENT }}
           CHECKOUT_CITY:        ${{ secrets.CHECKOUT_CITY }}
           CHECKOUT_STORE_CODE:  ${{ secrets.CHECKOUT_STORE_CODE }}
           AUTO_CHECKOUT:        'true'
           HEADLESS:             'true'
-          MONITOR_MODE:         'exhibition'
-          CHECK_ROUNDS:         '580'
+          MONITOR_MODE:         'product'
+          CHECK_ROUNDS:         '500'
           CHECKOUT_MAX:         '3'
-          ORDER_STATE_FILE:     'eslite_order_state.json'
+          ORDER_STATE_FILE:     'eslite_product_order_state.json'
           STORAGE_STATE_FILE:   'eslite_storage_state.json'
         working-directory: eslite_monitor
         run: python eslite_monitor.py
