@@ -3,8 +3,6 @@
 *.env
 
 # 執行期狀態（由 GitHub Actions cache / secret 管理）
-seen_products.json
-seen_products_test.json
 *_order_state.json
 *_storage_state.json
 

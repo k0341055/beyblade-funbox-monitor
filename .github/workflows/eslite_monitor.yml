@@ -6,7 +6,7 @@ on:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 62
+    timeout-minutes: 65
 
     steps:
       - name: Checkout code
@@ -34,15 +34,6 @@ jobs:
 
       - name: Install Playwright Chromium
         run: python -m playwright install chromium --with-deps
-
-      # ── 通知冷卻狀態 ────────────────────────────────────────────────
-      - name: Restore seen products state
-        uses: actions/cache@v4
-        with:
-          path: eslite_monitor/seen_products.json
-          key: eslite-seen-${{ github.run_id }}
-          restore-keys: |
-            eslite-seen-
 
       # ── 下單狀態（避免重複下單） ─────────────────────────────────────
       - name: Restore order state
@@ -86,9 +77,8 @@ jobs:
           CHECKOUT_STORE_CODE:  ${{ secrets.CHECKOUT_STORE_CODE }}
           AUTO_CHECKOUT:        'true'
           HEADLESS:             'true'
-          CHECK_ROUNDS:         '580'
+          CHECK_ROUNDS:         '380'
           CHECKOUT_MAX:         '3'
-          STATE_FILE:           'seen_products.json'
           ORDER_STATE_FILE:     'eslite_order_state.json'
           STORAGE_STATE_FILE:   'eslite_storage_state.json'
         working-directory: eslite_monitor

@@ -1,6 +1,6 @@
 # 1999 X & Funbox & 誠品 商品偵測器
 
-自動偵測三個電商的 Beyblade X 商品庫存，Funbox 偵測到有庫存時同時自動登入下單，並透過 Gmail 發送通知。每小時由 cron-job.org 觸發一次 GitHub Actions，每次執行持續監控約 60 分鐘。
+自動偵測三個電商的 Beyblade X 商品庫存，並在有庫存時透過 Gmail 發送通知。Funbox 與誠品支援自動下單。每小時由 cron-job.org 觸發一次 GitHub Actions，每次執行持續監控約 45~60 分鐘。
 
 ---
 
@@ -14,19 +14,27 @@ flowchart TD
     CRON -->|workflow_dispatch| GA2["GitHub Actions\nfunbox_monitor\nubuntu VM"]
     CRON -->|workflow_dispatch| GA3["GitHub Actions\neslite_monitor\nubuntu VM"]
 
-    GA1 --> PW1["Playwright + Chromium\n190 輪 / 次\n共用瀏覽器"]
-    GA2 --> REQ["requests 登入／加購\n＋ Playwright 結帳\n820 輪 / 次"]
-    GA3 --> PW3["Playwright + Chromium\n580 輪 / 次\n共用瀏覽器"]
+    GA1 --> PW1["Playwright async\n190 輪 / 次\n隨機 UA + viewport"]
+    GA2 --> REQ["requests 登入/加購\n+ Playwright 結帳\n820 輪 / 次"]
+    GA3 --> PW3["Playwright sync\n580 輪 / 次\n共用瀏覽器 + session"]
 
-    PW1 --> SITE1["1999.co.jp\nBeyblade X 頁\nCloudflare 保護"]
-    REQ --> SITE2["shop.funbox.com.tw\n戰鬥陀螺集合頁\nCyberbiz SPA"]
-    PW3 --> SITE3["athena.eslite.com\nBeyblade X 專區\nCloudflare 保護"]
+    PW1 --> SITE1["1999.co.jp\nBeyblade X 搜尋頁\nCloudflare 保護"]
+    REQ --> SITE2["shop.funbox.com.tw\nCyberbiz /products.json API"]
+    PW3 --> SITE3["athena.eslite.com\nbook_exhibits API\nCloudflare 保護"]
 
-    SITE1 --> COOL["1 小時冷卻去重邏輯\nseen_products.json\nGitHub Actions cache"]
-    SITE2 --> COOL
-    SITE3 --> COOL
+    SITE1 --> COOL1["1 小時冷卻\nseen_products.json"]
+    SITE2 --> COOL2["1 小時冷卻\nseen_products.json"]
+    SITE3 --> NOCD["無冷卻\n每輪有庫存即通知"]
 
-    COOL -->|有新商品 / 冷卻到期| MAIL["Gmail SMTP SSL\n→ GMAIL_RECIPIENTS\nGitHub Secret"]
+    COOL1 -->|新商品 / 到期| MAIL1["Gmail → 全體收件人"]
+    COOL2 -->|新商品 / 到期| MAIL2["Gmail → 全體收件人"]
+    NOCD --> MAIL3["Gmail → 全體收件人\n含一鍵結帳連結"]
+
+    COOL2 -->|同輪觸發| BUY["多帳號平行下單\nThreadPoolExecutor\n7-11 貨到付款"]
+    NOCD -->|同輪觸發| ECART["eslite 自動登入\n→ 清空購物車\n→ 加入購物車"]
+
+    ECART -->|加入成功（不論結帳）| CNOTIF["購物車通知\n→ ORDER_RECIPIENTS\n含一鍵結帳連結"]
+    ECART -->|自動結帳成功| ONOTIF["訂單確認通知\n→ ORDER_RECIPIENTS"]
 ```
 
 ---
@@ -37,17 +45,18 @@ flowchart TD
 beyblade-funbox-monitor/
 ├── .github/
 │   └── workflows/
-│       ├── 1999_monitor.yml       # 1999.co.jp Beyblade X workflow
-│       ├── funbox_monitor.yml     # Funbox 戰鬥陀螺 workflow
-│       └── eslite_monitor.yml     # 誠品 Beyblade X workflow
+│       ├── 1999_monitor.yml        # 1999.co.jp workflow
+│       ├── funbox_monitor.yml      # Funbox 戰鬥陀螺 workflow
+│       └── eslite_monitor.yml      # 誠品 Beyblade X workflow
 ├── 1999_monitor/
-│   ├── 1999_monitor.py            # 主程式（Playwright，含 Cloudflare 反偵測，僅通知）
+│   ├── 1999_monitor.py             # 主程式（Playwright async，僅通知）
 │   └── requirements.txt
 ├── funbox_monitor/
-│   ├── funbox_monitor.py          # 主程式（requests + Playwright 混合架構）
+│   ├── funbox_monitor.py           # 主程式（requests + Playwright 混合）
 │   └── requirements.txt
 └── eslite_monitor/
-    ├── eslite_monitor.py          # 主程式（Playwright 繞過 Cloudflare，僅通知）
+    ├── eslite_monitor.py           # 主程式（Playwright sync，自動下單）
+    ├── generate_session.py         # 一次性工具：本機手動登入並儲存 session
     └── requirements.txt
 ```
 
@@ -58,12 +67,13 @@ beyblade-funbox-monitor/
 | | 1999 | Funbox | 誠品 (Eslite) |
 |---|---|---|---|
 | 目標網站 | `1999.co.jp` | `shop.funbox.com.tw` | `eslite.com` |
-| 偵測商品 | Beyblade X 系列 | 戰鬥陀螺 | Beyblade X 專區 |
-| 反爬蟲 | Cloudflare（需反偵測） | Cyberbiz `/products.json` API | Cloudflare（Playwright 繞過） |
-| 技術架構 | Playwright 全程（async） | requests 登入/加購 + Playwright 結帳 | Playwright 全程（sync，共用瀏覽器） |
-| 每次執行輪數 | 190 輪（間隔 5~8 秒） | 820 輪（間隔 3~5 秒） | 580 輪（間隔 3~5 秒） |
-| 執行時長 / timeout | 約 60 分鐘 / 62 min | 約 57 分鐘 / 65 min | 約 45 分鐘 / 62 min |
-| 自動下單 | 無（結帳需通過 reCAPTCHA） | 有（3 帳號平行） | 無 |
+| 偵測商品 | Beyblade X 系列 | 戰鬥陀螺集合頁 | Beyblade X 專區 |
+| 反爬蟲機制 | Cloudflare（隨機 UA/viewport/locale） | Cyberbiz `/products.json`（無反爬） | Cloudflare（Playwright 繞過） |
+| 技術架構 | Playwright async | requests 登入/加購 + Playwright 結帳 | Playwright sync（共用瀏覽器） |
+| 每次執行輪數 | 190 輪（間隔 5~8 秒） | 820 輪（間隔 3~5 秒） | 380 輪（間隔 3~5 秒） |
+| 執行時長 / timeout | ~20 分鐘 / 62 min | ~57 分鐘 / 65 min | ~55 分鐘 / 65 min |
+| 通知冷卻 | 1 小時冷卻 | 1 小時冷卻 | **無冷卻（每輪有庫存即通知）** |
+| 自動下單 | 無（1999 結帳需 reCAPTCHA） | **有**（3 帳號平行，7-11 貨到付款） | **有**（加入購物車 + 自動結帳） |
 | 觸發頻率 | 每小時一次 | 每小時一次 | 每小時一次 |
 
 ---
@@ -72,31 +82,40 @@ beyblade-funbox-monitor/
 
 ### 偵測邏輯
 
-使用 Playwright 開啟搜尋頁（`sortid=7&soldout=0` 只顯示有庫存商品），解析以下欄位：
+使用 Playwright async 開啟搜尋頁（`sortid=7&soldout=0` 只顯示有庫存商品），解析以下欄位：
 
-| 欄位 | 說明 |
+| 欄位 | CSS 選擇器 |
 |---|---|
 | 商品標題 | `div.c-card__title` |
 | 發售日 | `div.c-card__maker` |
 | 價格 | `div.c-card__price-element` |
-| 折扣 | `div.c-card__price-tags-discount` |
+| 折扣 | `div.c-card__price-tags-discount span` |
 | 商品連結 | `a.c-card__info-links` |
 
-搜尋結果為空時，程式會自動區分兩種情況：
-- **Cloudflare 攔截**：偵測到 challenge-form 等元素 → WARNING log
+搜尋結果為空時，程式自動區分兩種情況：
+- **Cloudflare 攔截**：偵測到 `challenge-form` 等元素 → WARNING log，本輪跳過
 - **目前無現貨**：搜尋結果正常但為空 → INFO log（正常情形，不報錯）
 
-### 冷卻邏輯
+### Cloudflare 反偵測策略
 
-與 Funbox / 誠品完全一致：1 小時冷卻、商品消失即清除 `seen_products`。
+- 隨機 User-Agent：OS 字串 × Chrome 版本（118~125）× WebKit build 隨機組合
+- 隨機 Viewport：1366×768 ~ 1920×1080 五種選一
+- locale `ja-JP`、timezone `Asia/Tokyo`（模擬日本用戶）
+- 自訂 HTTP headers（`Accept-Language`, `Sec-Fetch-*`）
+- `navigator.webdriver = undefined`（隱藏自動化特徵）
+- slow_mo 隨機 jitter（±30%）
+
+### 通知冷卻邏輯
+
+- 同款商品 **1 小時內最多通知一次**（`seen_products.json` 記錄上次通知時間）
+- 商品下架 → 當輪從 `seen_products` 移除 → 重新上架視為全新，立即通知
 
 ### Email 通知格式
 
 - 主旨：`【1999 beyblade X 補貨！】偵測到 N 件商品`
 - 每件商品顯示：商品名、發售日、價格（含折扣）、商品連結
-- 末尾附上購物車結帳連結（`https://www.1999.co.jp/order`）與完整搜尋頁連結
-- 偵測時間（台灣時間 UTC+8）
-- 無自動下單（1999.co.jp 結帳流程需通過 reCAPTCHA，須人工完成）
+- 末尾附上一鍵結帳連結（`https://www.1999.co.jp/order`）與完整搜尋頁連結
+- 無自動下單（1999.co.jp 結帳需通過 reCAPTCHA，須人工完成）
 
 ---
 
@@ -104,12 +123,11 @@ beyblade-funbox-monitor/
 
 ### 偵測邏輯
 
-使用 Cyberbiz `/products.json` API，每輪不到 1 秒即可完成，解析以下欄位：
+使用 `requests` 直接呼叫 Cyberbiz `/products.json` API，每輪不到 1 秒即可完成：
 
 | 欄位 | 說明 |
 |---|---|
 | `inventory_quantity` | 實際庫存數量 |
-| `inventory_quantity_status` | 庫存狀態（safety / low 等） |
 | `inventory_policy` | `deny` = 售完即止，不超賣 |
 | `qc` | 每筆訂單加購上限（`null` = 無限制） |
 | `purchase_eligibility.status` | 購買資格（eligible / ineligible） |
@@ -119,33 +137,67 @@ beyblade-funbox-monitor/
 有庫存 → BX-01 雷霆飛龍 | 庫存:5 件 | 限購:1件/單 | NT$350
 ```
 
+### 通知冷卻邏輯
+
+```
+每輪執行
+  │
+  ├─ Cyberbiz API 取得有庫存商品清單
+  │
+  ├─ 清除 seen_products 中「已下架」的條目
+  │     └─ 確保商品下架後再上架，能立即重新通知並下單
+  │
+  ├─ 比對剩餘 seen_products
+  │     ├─ 未曾通知 → 下單 + 發通知
+  │     ├─ 上次通知超過 1 小時 → 下單 + 再次通知
+  │     └─ 1 小時內已通知 → 跳過（冷卻中）
+  │
+  └─ 更新 seen_products（台灣時間時間戳）
+```
+
+> **重點**：庫存歸零時，當輪即從 `seen_products` 移除；商品重新上架視為全新，不受 1 小時限制。
+
 ### 自動下單流程
 
 ```
-偵測到有庫存商品
+偵測到需通知的有庫存商品
   │
-  ├─ APP 限定商品 → 跳過（僅通知）
+  ├─ APP 限定商品（標題含 "APP"）→ 跳過（僅通知）
   │
   └─ 非 APP 商品 → 多帳號平行執行（ThreadPoolExecutor）
         │
-        ├─ [帳號 1] requests 登入 → 加購所有商品（各 3 件）→ 取得 /carts/{token}
+        ├─ [帳號 1] requests 登入 → 全部商品加入購物車 → Playwright 結帳
         ├─ [帳號 2] 同步並行執行
         └─ [帳號 3] 同步並行執行
               │
-              └─ Playwright 開啟結帳 SPA
+              └─ Playwright 結帳 SPA
                     ├─ 確認結帳頁為 /carts/{token}（session 驗證）
                     ├─ 選擇 7-11 貨到付款（避免信用卡 3DS 卡單）
-                    ├─ 套用優惠券（若有可用）
-                    ├─ 勾選同意條款
-                    └─ 點擊立即結帳
+                    ├─ 套用優惠券（若有可用，選第一張）
+                    ├─ 紅利點數重設為 0（避免自動折抵影響訂單）
+                    ├─ 勾選所有同意條款 checkbox
+                    └─ 點擊立即結帳（精確定位 btn-lg，排除頂部 nav 隱藏連結）
 ```
 
 ### 購買數量規則
 
-- 預設每件商品加入 **3 件**（`CART_QTY=3`）
-- 若商品有限購（`qc` 欄位有值）：`min(3, 庫存, qc)`
-- 若庫存不足 3 件：`min(3, 庫存)`
-- 某件商品加購失敗 → 跳過該件，繼續加其他商品，最後一起結帳
+| 情況 | 數量決策 |
+|---|---|
+| API `qc` 欄位有值 | `min(CART_QTY=3, 庫存, qc)` |
+| 標題含隨機強化組/抽抽包 | `min(3, 庫存)` |
+| 一般陀螺（保守） | `min(1, 庫存)` |
+
+> 加購失敗時自動降量至 1 重試；降量後仍失敗則跳過該件，繼續其他商品。
+
+### 下單狀態去重
+
+`seen_products.json` 同時記錄三個 key：
+
+| Key | 說明 | 去重規則 |
+|---|---|---|
+| `notified` | 上次通知時間 | 1 小時冷卻 |
+| `purchased` | `{href: [成功帳號清單]}` | 已購買的帳號跳過 |
+| `attempts` | `{href: {帳號: 失敗次數}}` | 失敗 ≥ 2 次跳過 |
 
 ### 結帳狀態判斷
 
@@ -154,47 +206,28 @@ beyblade-funbox-monitor/
 | `success` | ✅ 已自動結帳完成 |
 | `payment_failed` | ❌ 訂單已建立但付款失敗（`?show_failed=yes`），請手動完成付款 |
 | `3ds_pending` | ⚠ 訂單已建立，需完成銀行 3DS 驗證 |
+| `checkout_limited` | 🚫 CYBERBIZ 在結帳層級攔截限購，請手動調整數量 |
 | `cart` | 🛒 商品已在購物車，請手動完成結帳 |
 | `failed` | ❌ 自動購買失敗，請手動下單 |
 
-### 通知冷卻邏輯
-
-```
-每輪執行
-  │
-  ├─ 取得 API 有庫存商品清單
-  │
-  ├─ 先清除 seen_products 中「已不在庫存」的條目
-  │     └─ 確保商品下架後再上架，能立即重新通知並下單
-  │
-  ├─ 比對剩餘 seen_products
-  │     ├─ 未曾通知 → 發通知 + 下單
-  │     ├─ 上次通知超過 1 小時 → 再次發通知 + 下單
-  │     └─ 1 小時內已通知 → 跳過（冷卻中）
-  │
-  └─ 更新 seen_products（台灣時間時間戳）
-```
-
-> **重點**：庫存歸零時，當輪即從 `seen_products` 移除；商品重新上架時視為全新，不受 1 小時限制。
-
 ### Email 通知格式
 
-- 主旨：`【Funbox 有貨了！】偵測到 N 件商品`
-- 每件商品顯示：商品名、價格、庫存、下單上限、連結
-- 各帳號購買狀態三態顯示：
-  - `✅ 已加入購物車`
-  - `❌ 加入失敗（受限或錯誤）`
-  - `— 未嘗試（超出本次購買上限）`
-- 各帳號結帳結果
-- 偵測時間（台灣時間 UTC+8）
+- **廣播信**（→ 全體 GMAIL_RECIPIENTS）：商品資訊 + 各帳號結帳摘要（含狀態、加入件數）
+- **個人信**（→ 各 Funbox 帳號）：該帳號每件商品加購狀態（✅ 加入 / ❌ 失敗 / — APP略過）+ 結帳結果
 
 ---
 
 ## 誠品監控器功能
 
-### 偵測邏輯
+### 偵測邏輯（兩個來源）
 
-使用 Playwright 開啟 `athena.eslite.com` book_exhibits API（繞過 Cloudflare），對 JSON 回應進行**遞迴解析**，找出所有含 `product_guid` + `name` 的節點（不限巢狀深度）。
+**來源 A：展覽 API（主要）**
+
+使用 Playwright 開啟 `athena.eslite.com/api/v1/book_exhibits/{EXHIBITION_ID}`（繞過 Cloudflare），對 JSON 回應進行**遞迴解析**，不限巢狀深度找出所有含 `product_guid` + `name` 的節點。
+
+**來源 B：個別追蹤（`ESLITE_EXTRA_PRODUCTS`）**
+
+對 `ESLITE_EXTRA_PRODUCTS` 列出的 GUID，逐一呼叫 `athena.eslite.com/api/v1/products/{guid}` 查詢庫存狀態，已在展覽清單中的不重複查詢。
 
 解析欄位：
 
@@ -203,42 +236,99 @@ beyblade-funbox-monitor/
 | `stock` | 庫存數量 |
 | `account_qty_limit` | 帳號購買上限（`null` = 無限制） |
 | `order_qty_limit` | 每單購買上限（`null` = 無限制） |
-| `status` / `product_button_status` | 商品狀態（`add_to_shopping_cart` 表示可購買） |
+| `product_button_status` | `add_to_shopping_cart` 表示可購買 |
+
+略過名稱含 `ESLITE_SKIP_KEYWORDS`（預設 `UX-14`）的商品。
+
+### 通知邏輯（無冷卻）
+
+**每輪只要偵測到有庫存，就立即發送通知**，沒有 1 小時冷卻限制。通知信件附有一鍵結帳連結（`eslite.com/cart/step2`）。
 
 ### 效能優化
 
-單次執行僅啟動一次 Chromium，所有 580 輪共用同一個 page：
+單次執行僅啟動一次 Chromium，所有 380 輪共用同一個 page：
 
-```
-啟動 Chromium（僅一次）
-  │
-  ├─ 第 1 輪：page.goto(API) + 解析 + 通知（~9 秒）
-  ├─ 第 2 輪：page.goto(API) + 解析（~7 秒，省去瀏覽器啟動）
-  ├─ ...
-  └─ 第 580 輪
-  │
-  └─ 關閉瀏覽器
-```
-
-| | 舊版（每輪重啟） | 新版（共用瀏覽器） |
+| | 舊版（每輪重啟） | 現版（共用瀏覽器） |
 |---|---|---|
-| 每輪耗時 | ~15 秒 | ~7 秒（第 2 輪起） |
-| 60 分鐘可跑 | ~180 輪 | ~580 輪 |
+| 每輪耗時 | ~15 秒 | ~8.9 秒（實測） |
+| 60 分鐘可跑 | ~180 輪 | ~380 輪 |
 
-### 略過商品
+### 自動下單流程
 
-名稱含 `ESLITE_SKIP_KEYWORDS`（預設 `UX-14`）的商品不通知，逗號分隔可設多組關鍵字。
+```
+偵測到有庫存商品
+  │
+  ├─ 過濾：移除 eslite_order_state.json 中已下單的商品
+  ├─ 取前 CHECKOUT_MAX 件（預設 3，防止大型展覽大量下單）
+  │
+  ├─ ensure_logged_in()
+  │     ├─ 帶 storage_state cookies → 導覽 /member → 確認登出按鈕存在
+  │     └─ 若未登入 → _do_login()（填帳密 → 等待 reCAPTCHA → 存 session）
+  │
+  ├─ 清空購物車（逐一點擊刪除按鈕）
+  │
+  ├─ 對每件商品：add_to_cart(guid, qty)
+  │     ├─ 計算數量：min(account_qty_limit, order_qty_limit, stock)
+  │     ├─ 等待 SPA 渲染（wait_for_selector，非固定 timeout）
+  │     └─ 若 qty > 1，先填數量輸入框再點按鈕
+  │
+  ├─ 【立即發送購物車通知】→ ORDER_RECIPIENTS（含一鍵結帳連結）
+  │     （此時商品已在購物車，就算後續結帳失敗也可手動結帳）
+  │
+  └─ checkout()
+        ├─ goto /cart → 點結帳 → 選「誠品門市取貨」
+        ├─ scrollBy(0, 400)（讓城市/門市下拉選單進入視窗）
+        ├─ 選城市（CHECKOUT_CITY）→ 選門市（CHECKOUT_STORE_CODE）
+        ├─ 點「ATM轉帳」→ 點「確認結帳」
+        ├─ wait_for_url "**/cart/step3**"
+        │
+        ├─ 成功 → 發訂單確認通知 → 寫入 eslite_order_state.json（永久去重）
+        └─ 失敗 → log 警告（商品仍留購物車，購物車通知已發出）
+```
 
-### 冷卻邏輯
+> 誠品購物車**跨裝置、跨登入持久存在**，就算自動結帳失敗，商品仍留在購物車中，使用者可直接點購物車通知信中的連結手動完成結帳。
 
-與 Funbox 完全一致：1 小時冷卻、庫存歸零即清除 `seen_products`。
+### 下單去重
+
+`eslite_order_state.json` 記錄已成功下單的 `product_guid`，**永久不重複下單**（即使商品重新上架）。只有手動刪除此檔案才會重置。
 
 ### Email 通知格式
 
-- 主旨：`【誠品 Beyblade X 有貨了！】偵測到 N 件商品`
-- 每件商品顯示：商品名、庫存、帳號上限、每單上限、連結
-- 偵測時間（台灣時間 UTC+8）
-- 無自動下單（僅通知）
+| 通知類型 | 收件人 | 觸發時機 | 附帶資訊 |
+|---|---|---|---|
+| **庫存通知** | 全體 GMAIL_RECIPIENTS | 每輪偵測到有庫存 | 商品名/庫存/上限/連結 + 一鍵結帳連結 |
+| **購物車通知** | ORDER_RECIPIENTS | 加入購物車成功後立即發 | 商品名/加入數量/上限 + 一鍵結帳連結 |
+| **訂單確認通知** | ORDER_RECIPIENTS | 自動結帳成功 | 訂單編號/付款方式/取貨門市/商品清單 |
+| **登入失敗警告** | ORDER_RECIPIENTS | Session 失效且無法自動登入 | 手動重新登入步驟說明 |
+
+### Session 持久化（跨 VM 關鍵）
+
+```
+每次 run 開始
+  ├─ 優先：Actions cache 還原 eslite_storage_state.json
+  │         (key: eslite-session-{run_id}，restore-keys: eslite-session-)
+  └─ 備援：若 cache miss → 從 ESLITE_STORAGE_STATE_B64 secret base64 解碼
+
+程式執行結束
+  └─ ctx.storage_state() 儲存最新 cookies（包含信任裝置 cookie）
+
+每次 run 結束後
+  └─ Actions cache 自動儲存（供下次 run 使用）
+```
+
+Session 存活時間：信任裝置 cookie 約 30~90 天，但由於腳本每小時執行並刷新 cookies，**只要連續正常執行 session 就不會過期**。
+
+**Session 失效處理**（手動）：
+
+```bash
+# 1. 本機執行（會開啟瀏覽器，手動完成 reCAPTCHA / 簡訊驗證）
+cd eslite_monitor && python generate_session.py
+
+# 2. 更新 GitHub Secret
+gh secret set ESLITE_STORAGE_STATE_B64 \
+  --body "$(base64 -i eslite_storage_state.json | tr -d '\n')" \
+  --repo k0341055/beyblade-funbox-monitor
+```
 
 ---
 
@@ -246,23 +336,29 @@ beyblade-funbox-monitor/
 
 ### GitHub Secrets（必填）
 
-| Secret | 說明 |
-|---|---|
-| `GMAIL_SENDER` | 寄件 Gmail 帳號 |
-| `GMAIL_PASSWORD` | Gmail App Password（非登入密碼） |
-| `GMAIL_RECIPIENTS` | 收件人，逗號分隔（三個監控共用） |
-| `FUNBOX_EMAIL` | Funbox 帳號 1 |
-| `FUNBOX_PASSWORD` | Funbox 密碼 1 |
-| `FUNBOX_EMAIL_2` | Funbox 帳號 2 |
-| `FUNBOX_PASSWORD_2` | Funbox 密碼 2 |
-| `FUNBOX_EMAIL_3` | Funbox 帳號 3 |
-| `FUNBOX_PASSWORD_3` | Funbox 密碼 3 |
+| Secret | 適用監控 | 說明 |
+|---|---|---|
+| `GMAIL_SENDER` | 全部 | 寄件 Gmail 帳號 |
+| `GMAIL_PASSWORD` | 全部 | Gmail App Password（非登入密碼） |
+| `GMAIL_RECIPIENTS` | 全部 | 收件人，逗號分隔（所有商品通知） |
+| `FUNBOX_EMAIL` | Funbox | Funbox 帳號 1 |
+| `FUNBOX_PASSWORD` | Funbox | Funbox 密碼 1 |
+| `FUNBOX_EMAIL_2` | Funbox | Funbox 帳號 2 |
+| `FUNBOX_PASSWORD_2` | Funbox | Funbox 密碼 2 |
+| `FUNBOX_EMAIL_3` | Funbox | Funbox 帳號 3 |
+| `FUNBOX_PASSWORD_3` | Funbox | Funbox 密碼 3 |
+| `ESLITE_ACCOUNT` | 誠品 | 誠品登入帳號（手機號） |
+| `ESLITE_PASSWORD` | 誠品 | 誠品登入密碼 |
+| `ORDER_RECIPIENT` | 誠品 | 下單/購物車通知收件人（逗號分隔） |
+| `CHECKOUT_CITY` | 誠品 | 取貨城市（如 `新竹市`） |
+| `CHECKOUT_STORE_CODE` | 誠品 | 門市代碼（如 `B060` 巨城） |
+| `ESLITE_STORAGE_STATE_B64` | 誠品 | Session 備援（base64 編碼的 storage_state.json） |
 
 > 設定路徑：GitHub Repo → Settings → Secrets and variables → Actions → New repository secret
 
 ### 本機開發
 
-**`1999_monitor/.env`**（不進版控）：
+**`1999_monitor/.env`**：
 
 ```env
 GMAIL_SENDER=your@gmail.com
@@ -270,11 +366,10 @@ GMAIL_PASSWORD=xxxx xxxx xxxx xxxx
 GMAIL_RECIPIENTS=your@gmail.com
 CHECK_ROUNDS=1
 HEADLESS=false
-# 可選：覆蓋預設搜尋關鍵字（預設為 beyblade X）
 # SEARCH_URL=https://www.1999.co.jp/search?typ1_c=100&cat=&searchkey=tomica&sortid=7&soldout=0
 ```
 
-**`funbox_monitor/.env`**（不進版控）：
+**`funbox_monitor/.env`**：
 
 ```env
 GMAIL_SENDER=your@gmail.com
@@ -289,41 +384,57 @@ FUNBOX_EMAIL_3=third@gmail.com
 FUNBOX_PASSWORD_3=third_password
 ```
 
-**`eslite_monitor/.env`**（不進版控）：
+**`eslite_monitor/.env`**：
 
 ```env
 GMAIL_SENDER=your@gmail.com
 GMAIL_PASSWORD=xxxx xxxx xxxx xxxx
 GMAIL_RECIPIENTS=a@gmail.com,b@gmail.com
+ESLITE_ACCOUNT=0900000000
+ESLITE_PASSWORD=YourPassword
+ORDER_RECIPIENT=your@gmail.com
+CHECKOUT_CITY=新竹市
+CHECKOUT_STORE_CODE=B060
 CHECK_ROUNDS=1
-STATE_FILE=seen_products.json
+HEADLESS=false
+AUTO_CHECKOUT=true
 ```
 
-#### Funbox 選填環境變數
+### 選填環境變數
 
-| 變數 | 預設值 | 說明 |
-|---|---|---|
-| `SEARCH_URL` | Beyblade 集合 URL | 監控目標（可改為任意 Cyberbiz 集合或單一商品 URL） |
-| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 820） |
-| `CART_QTY` | `3` | 每件商品加入購物車數量 |
-| `MAX_BUY_PRODUCTS` | `0`（無限制） | 限制本次最多購買幾件（測試用） |
-| `TEST_MODE` | `0` | 設為 `1` 時 email 主旨加【測試】標注 |
-
-#### 誠品選填環境變數
-
-| 變數 | 預設值 | 說明 |
-|---|---|---|
-| `ESLITE_API_URL` | CU202503-00091 專區 URL | 監控目標（可替換為其他誠品活動頁 API） |
-| `ESLITE_SKIP_KEYWORDS` | `UX-14` | 略過的商品關鍵字，逗號分隔 |
-| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 580） |
-
-#### 1999 選填環境變數
+#### 1999
 
 | 變數 | 預設值 | 說明 |
 |---|---|---|
 | `SEARCH_URL` | Beyblade X 搜尋頁 URL | 監控目標（可替換為任意 1999.co.jp 搜尋 URL） |
 | `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 190） |
 | `HEADLESS` | `true` | 設為 `false` 可在本機看到瀏覽器視窗 |
+
+#### Funbox
+
+| 變數 | 預設值 | 說明 |
+|---|---|---|
+| `SEARCH_URL` | 戰鬥陀螺集合頁 URL | 監控目標（可改為任意 Cyberbiz 集合 URL） |
+| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 820） |
+| `CART_QTY` | `3` | 每件商品目標加入數量 |
+| `MAX_BUY_PRODUCTS` | `0`（無限制） | 限制本次最多購買幾件（測試用） |
+| `TEST_MODE` | `0` | 設為 `1` 時 email 主旨加【測試】標注 |
+
+#### 誠品
+
+| 變數 | 預設值 | 說明 |
+|---|---|---|
+| `ESLITE_API_URL` | CU202503-00091 展覽 API | 監控目標（可替換為其他誠品活動頁 API） |
+| `ESLITE_EXTRA_PRODUCTS` | `10022136782683190211005` | 額外個別追蹤的商品 GUID，逗號分隔 |
+| `ESLITE_SKIP_KEYWORDS` | `UX-14` | 略過的商品名稱關鍵字，逗號分隔 |
+| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 580） |
+| `CHECKOUT_MAX` | `3` | 每次最多加入購物車的商品件數 |
+| `AUTO_CHECKOUT` | `true` | 設為 `false` 可停用自動下單（僅通知） |
+| `HEADLESS` | `true` | 設為 `false` 可在本機手動完成 reCAPTCHA |
+| `ORDER_STATE_FILE` | `eslite_order_state.json` | 下單去重狀態檔路徑 |
+| `STORAGE_STATE_FILE` | `eslite_storage_state.json` | Session cookies 存放路徑 |
+
+### 本機執行
 
 ```bash
 # 1999
@@ -336,17 +447,21 @@ pip install -r funbox_monitor/requirements.txt
 python -m playwright install chromium
 cd funbox_monitor && python funbox_monitor.py
 
-# 誠品
+# 誠品（首次需先產生 session）
 pip install -r eslite_monitor/requirements.txt
 python -m playwright install chromium
-cd eslite_monitor && python eslite_monitor.py
+cd eslite_monitor
+python generate_session.py   # 開啟瀏覽器，手動完成登入/驗證，儲存 session
+python eslite_monitor.py
 ```
 
 ---
 
 ## 狀態持久化
 
-`seen_products.json` 由 GitHub Actions cache 在跨執行之間傳遞（三個監控各自獨立）：
+所有狀態檔由 GitHub Actions cache 在跨 run 之間傳遞，不進版控。
+
+### 1999 / Funbox：通知冷卻狀態
 
 ```yaml
 # 1999
@@ -356,20 +471,42 @@ cd eslite_monitor && python eslite_monitor.py
     key: 1999-seen-${{ github.run_id }}
     restore-keys: 1999-seen-
 
-# Funbox
+# Funbox（同時含 purchased / attempts 狀態）
 - uses: actions/cache@v4
   with:
     path: funbox_monitor/seen_products.json
     key: funbox-seen-${{ github.run_id }}
     restore-keys: funbox-seen-
+```
 
-# 誠品
+### 誠品：下單狀態 + Session
+
+```yaml
+# 下單去重（永久）
 - uses: actions/cache@v4
   with:
-    path: eslite_monitor/seen_products.json
-    key: eslite-seen-${{ github.run_id }}
-    restore-keys: eslite-seen-
+    path: eslite_monitor/eslite_order_state.json
+    key: eslite-order-${{ github.run_id }}
+    restore-keys: eslite-order-
+
+# Session（優先 cache，cache miss 時從 secret 解碼）
+- uses: actions/cache@v4
+  id: session-cache
+  with:
+    path: eslite_monitor/eslite_storage_state.json
+    key: eslite-session-${{ github.run_id }}
+    restore-keys: eslite-session-
+
+- if: steps.session-cache.outputs.cache-hit != 'true'
+  env:
+    ESLITE_STORAGE_STATE_B64: ${{ secrets.ESLITE_STORAGE_STATE_B64 }}
+  run: |
+    if [ -n "$ESLITE_STORAGE_STATE_B64" ]; then
+      echo "$ESLITE_STORAGE_STATE_B64" | base64 -d > eslite_monitor/eslite_storage_state.json
+    fi
 ```
+
+> Actions cache 最長保留 **7 天**，若超過 7 天沒有觸發，下次執行時 cache miss → 從 secret 還原 session。
 
 ---
 
@@ -378,12 +515,12 @@ cd eslite_monitor && python eslite_monitor.py
 由 **cron-job.org** 每小時呼叫 GitHub API，三個監控各建一個獨立任務：
 
 ```
-POST https://api.github.com/repos/k0341055/beyblade-funbox-monitor/actions/workflows/funbox_monitor.yml/dispatches
 POST https://api.github.com/repos/k0341055/beyblade-funbox-monitor/actions/workflows/1999_monitor.yml/dispatches
+POST https://api.github.com/repos/k0341055/beyblade-funbox-monitor/actions/workflows/funbox_monitor.yml/dispatches
 POST https://api.github.com/repos/k0341055/beyblade-funbox-monitor/actions/workflows/eslite_monitor.yml/dispatches
 ```
 
-每個任務的 Request Headers：
+Request Headers：
 ```
 Authorization: Bearer <PAT>
 Content-Type: application/json

@@ -1,12 +1,12 @@
 """
 誠品網路書店 Beyblade X 戰鬥陀螺監控
 - 偵測：athena.eslite.com book_exhibits API（Cloudflare 保護，需 Playwright 瀏覽器取得）
-- 通知：Gmail SMTP（所有 GMAIL_RECIPIENTS）
-- 自動下單：偵測到有庫存商品時，自動登入誠品並完成結帳
-  - 誠品會認裝置，首次在 GitHub Actions 執行前需先於本機完成一次簡訊驗證
+- 通知：Gmail SMTP（所有 GMAIL_RECIPIENTS）；每輪有庫存即通知（無冷卻），信件附結帳連結
+- 自動下單：偵測到有庫存商品時，自動登入並加入購物車
+  - 購物車跨裝置/跨登入持久存在，就算自動結帳失敗，商品仍留在購物車供手動結帳
+  - 購買數量依「帳號上限、每單上限、剩餘庫存」三者取最小值
   - STORAGE_STATE_FILE 保存 session cookies（含信任裝置 cookie），跨 VM 重用
-  - 下單通知只發送給 ORDER_RECIPIENT
-- 冷卻：同款商品 1 小時內最多通知一次；庫存歸零即清除，重新上架立即通知
+  - 下單/購物車通知只發送給 ORDER_RECIPIENT
 - 效能：單次執行僅啟動一次 Chromium，所有輪次共用同一 page
 """
 
@@ -45,8 +45,6 @@ EXTRA_PRODUCT_GUIDS = [
 ]
 
 CHECK_ROUNDS = int(os.environ.get("CHECK_ROUNDS", "1"))
-STATE_FILE = Path(os.environ.get("STATE_FILE", "seen_products.json"))
-NOTIFY_COOLDOWN = timedelta(hours=1)
 TW_TZ = timezone(timedelta(hours=8))
 
 GMAIL_SENDER = os.environ["GMAIL_SENDER"]
@@ -118,35 +116,6 @@ def _send_email(recipients: list, subject: str, body: str):
 
 
 # ─────────────────────────────────────────────
-# 通知冷卻狀態（1 小時）
-# ─────────────────────────────────────────────
-
-
-def load_notified() -> dict:
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8")).get("notified", {})
-    return {}
-
-
-def save_notified(notified: dict):
-    STATE_FILE.write_text(
-        json.dumps(
-            {"notified": notified, "updated": datetime.now(TW_TZ).isoformat()},
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-
-def _parse_ts(ts_str: str) -> datetime:
-    dt = datetime.fromisoformat(ts_str)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=TW_TZ)
-    return dt
-
-
-# ─────────────────────────────────────────────
 # 下單狀態（避免重複下單）
 # ─────────────────────────────────────────────
 
@@ -169,6 +138,19 @@ def _save_order_state(ordered: dict):
         ),
         encoding="utf-8",
     )
+
+
+def _calc_order_qty(product: dict) -> int:
+    """依帳號上限、每單上限、庫存三者取最小值，算出本次下單數量（至少 1）。"""
+    acct_lim = product.get("account_qty_limit")
+    ord_lim = product.get("order_qty_limit")
+    stock = product.get("stock") or 1
+    qty = stock
+    if ord_lim:
+        qty = min(qty, int(ord_lim))
+    if acct_lim:
+        qty = min(qty, int(acct_lim))
+    return max(1, qty)
 
 
 # ─────────────────────────────────────────────
@@ -227,7 +209,7 @@ def fetch_products(page) -> list:
     """
     # ── 1. 展覽 API ──
     page.goto(API_URL, wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(1500)
 
     try:
         raw = page.inner_text("pre")
@@ -468,8 +450,8 @@ def _clear_cart(page):
         log.warning(f"清空購物車發生錯誤（繼續）：{e}")
 
 
-def add_to_cart(page, guid: str) -> bool:
-    """導覽至商品頁並加入購物車。"""
+def add_to_cart(page, guid: str, qty: int = 1) -> bool:
+    """導覽至商品頁並加入購物車，qty 為欲購買數量。"""
     url = f"{ESLITE_BASE}/product/{guid}"
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=20000)
@@ -482,6 +464,22 @@ def add_to_cart(page, guid: str) -> bool:
             )
         except Exception:
             pass
+
+        # 若需購買多件，先調整數量輸入框
+        if qty > 1:
+            try:
+                qty_input = page.query_selector(
+                    "input[type='number'][class*='qty'], "
+                    "input[type='number'][class*='quantity'], "
+                    "input[type='number'][name*='qty'], "
+                    "input[type='number']"
+                )
+                if qty_input:
+                    qty_input.triple_click()
+                    qty_input.fill(str(qty))
+                    log.info(f"已設定購買數量：{qty}")
+            except Exception:
+                pass
 
         btn = (
             page.query_selector("button:has-text('加入購物車')") or
@@ -515,7 +513,7 @@ def add_to_cart(page, guid: str) -> bool:
         except Exception:
             pass
 
-        log.info(f"已加入購物車：{guid}")
+        log.info(f"已加入購物車：{guid}（數量 {qty}）")
         return True
 
     except Exception as e:
@@ -621,6 +619,9 @@ def notify_products(products: list) -> bool:
         f"誠品戰鬥陀螺專區偵測到共 {count} 件有庫存商品",
         f"偵測時間：{datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M:%S')}（台灣時間）",
         "",
+        f">>> 立即結帳：{ESLITE_BASE}/cart/step2",
+        f">>> 查看購物車：{ESLITE_BASE}/cart",
+        "",
         "=" * 50,
     ]
 
@@ -644,6 +645,37 @@ def notify_products(products: list) -> bool:
     except Exception as e:
         log.error(f"庫存通知 Email 發送失敗：{e}")
         return False
+
+
+def notify_cart_added(products: list):
+    """商品已加入購物車，通知 ORDER_RECIPIENTS（含一鍵結帳連結）。"""
+    count = len(products)
+    subject = f"【誠品購物車已更新！】{count} 件商品已入購物車，請前往結帳"
+    now_str = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    lines = [
+        f"已將 {count} 件商品加入誠品購物車！",
+        f"時間：{now_str}（台灣時間）",
+        "",
+        f">>> 立即結帳（一鍵進入）：{ESLITE_BASE}/cart/step2",
+        f">>> 查看購物車：{ESLITE_BASE}/cart",
+        "",
+        "=" * 50,
+    ]
+    for i, p in enumerate(products, 1):
+        acct_lim = p.get("account_qty_limit")
+        ord_lim = p.get("order_qty_limit")
+        qty = _calc_order_qty(p)
+        lines.append(f"\n【商品 {i}】")
+        lines.append(f"商品名：{p['name']}")
+        lines.append(f"加入數量：{qty} 件")
+        lines.append(f"庫存（加入時）：{p.get('stock', '?')} 件")
+        lines.append(f"帳號上限：{'無限制' if acct_lim is None else f'{acct_lim} 件'}")
+        lines.append(f"每單上限：{'無限制' if ord_lim is None else f'{ord_lim} 件'}")
+        lines.append(f"商品連結：{p['url']}")
+        lines.append("-" * 40)
+
+    _send_email(ORDER_RECIPIENTS, subject, "\n".join(lines))
 
 
 def notify_order(products: list, order_id: str):
@@ -698,7 +730,11 @@ def _notify_login_required():
 
 
 def _attempt_checkout(page, ctx, in_stock_products: list):
-    """對尚未下單的有庫存商品執行自動下單。"""
+    """
+    對尚未下單的有庫存商品加入購物車，並嘗試自動結帳。
+    就算結帳失敗，商品仍留在購物車（誠品購物車跨裝置持久），
+    並立即發送含結帳連結的通知，讓使用者可手動完成結帳。
+    """
     ordered = _load_order_state()
 
     to_order = [p for p in in_stock_products if p["guid"] not in ordered][:CHECKOUT_MAX]
@@ -706,7 +742,7 @@ def _attempt_checkout(page, ctx, in_stock_products: list):
         log.info("所有有庫存商品均已在訂單狀態中，跳過下單")
         return
 
-    log.info(f"準備自動下單 {len(to_order)} 件商品（上限 CHECKOUT_MAX={CHECKOUT_MAX}）")
+    log.info(f"準備加入購物車 {len(to_order)} 件商品（上限 CHECKOUT_MAX={CHECKOUT_MAX}）")
 
     if not ensure_logged_in(page, ctx):
         log.warning("無法登入誠品，跳過自動下單")
@@ -716,14 +752,18 @@ def _attempt_checkout(page, ctx, in_stock_products: list):
 
     added = []
     for p in to_order:
-        if add_to_cart(page, p["guid"]):
+        qty = _calc_order_qty(p)
+        if add_to_cart(page, p["guid"], qty):
             added.append(p)
 
     if not added:
         log.warning("所有商品加入購物車均失敗，跳過結帳")
         return
 
-    log.info(f"已加入購物車 {len(added)} 件，開始結帳...")
+    # 加入購物車成功後立即通知（含一鍵結帳連結），無論後續結帳是否成功
+    notify_cart_added(added)
+    log.info(f"已加入購物車 {len(added)} 件，開始自動結帳...")
+
     order_id = checkout(page)
 
     if order_id:
@@ -733,7 +773,7 @@ def _attempt_checkout(page, ctx, in_stock_products: list):
             ordered[p["guid"]] = {"order_id": order_id, "ordered_at": now_str}
         _save_order_state(ordered)
     else:
-        log.error("結帳失敗，本輪未完成下單（下輪將重試）")
+        log.warning("自動結帳失敗，商品已留在購物車中，請點擊通知信中的連結手動完成結帳")
 
 
 # ─────────────────────────────────────────────
@@ -744,38 +784,16 @@ def _attempt_checkout(page, ctx, in_stock_products: list):
 def check_once(page, ctx) -> bool:
     try:
         products = fetch_products(page)
-        now = datetime.now(TW_TZ)
-        cutoff = now - NOTIFY_COOLDOWN
-
-        notified = load_notified()
-        current_guids = {p["guid"] for p in products}
-        notified = {g: t for g, t in notified.items() if g in current_guids}
 
         if not products:
             log.info("目前無庫存商品，繼續監控")
-            save_notified(notified)
             return True
 
-        to_notify = [
-            p for p in products
-            if p["guid"] not in notified
-            or _parse_ts(notified[p["guid"]]) < cutoff
-        ]
+        # 有庫存即通知，無冷卻限制
+        log.info(f"發送庫存通知：{len(products)} 件")
+        notify_products(products)
 
-        if to_notify:
-            log.info(
-                f"發送通知：{len(to_notify)} 件"
-                f"（共 {len(products)} 件，跳過 {len(products) - len(to_notify)} 件冷卻中）"
-            )
-            notify_products(to_notify)
-            for p in to_notify:
-                notified[p["guid"]] = now.isoformat()
-        else:
-            log.info(f"所有 {len(products)} 件商品均在 1 小時冷卻期內")
-
-        save_notified(notified)
-
-        # 自動下單（獨立於通知冷卻，以下單狀態去重）
+        # 自動下單（以下單狀態去重，避免重複下單）
         if AUTO_CHECKOUT and ESLITE_ACCOUNT:
             _attempt_checkout(page, ctx, products)
 
