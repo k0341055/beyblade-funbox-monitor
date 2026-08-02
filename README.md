@@ -18,7 +18,7 @@ flowchart TD
     GA1 --> PW1["Playwright async\n190 輪 / 次\n隨機 UA + viewport"]
     GA2 --> REQ["requests 登入/加購\n+ Playwright 結帳\n820 輪 / 次"]
     GA3 --> PW3["ExhibitionMonitor\nPlaywright sync\n580 輪 / 次\n共用瀏覽器 + session"]
-    GA4 --> PW4["ProductMonitor\nPlaywright sync\n500 輪 / 次\n共用瀏覽器 + session"]
+    GA4 --> PW4["ProductMonitor\nPlaywright sync\n580 輪 / 次\n共用瀏覽器 + session"]
 
     PW1 --> SITE1["1999.co.jp\nBeyblade X 搜尋頁\nCloudflare 保護"]
     REQ --> SITE2["shop.funbox.com.tw\nCyberbiz /products.json API"]
@@ -75,7 +75,7 @@ beyblade-funbox-monitor/
 | 偵測商品 | Beyblade X 系列 | 戰鬥陀螺集合頁 | Beyblade X 書展 API | `ESLITE_EXTRA_PRODUCTS` GUID 清單 |
 | 反爬蟲機制 | Cloudflare（隨機 UA/viewport/locale） | Cyberbiz `/products.json`（無反爬） | Cloudflare（Playwright 繞過） | Cloudflare（Playwright 繞過） |
 | 技術架構 | Playwright async | requests 登入/加購 + Playwright 結帳 | `ExhibitionMonitor`（OOP，Playwright sync） | `ProductMonitor`（OOP，Playwright sync） |
-| 每次執行輪數 | 190 輪（間隔 5~8 秒） | 820 輪（間隔 3~5 秒） | 580 輪（間隔 3~5 秒） | 500 輪（間隔 3~5 秒） |
+| 每次執行輪數 | 190 輪（間隔 5~8 秒） | 820 輪（間隔 3~5 秒） | 580 輪（間隔 3~5 秒） | 580 輪（間隔 3~5 秒） |
 | 執行時長 / timeout | ~20 分鐘 / 62 min | ~57 分鐘 / 65 min | ~58 分鐘 / 65 min | ~58 分鐘 / 65 min |
 | 通知冷卻 | 1 小時冷卻 | 1 小時冷卻 | **無冷卻（每輪有庫存即通知）** | **無冷卻（每輪有庫存即通知）** |
 | 自動下單 | 無（1999 結帳需 reCAPTCHA） | **有**（3 帳號平行，7-11 貨到付款） | **有**（加入購物車 + 自動結帳） | **有**（加入購物車 + 自動結帳） |
@@ -236,7 +236,7 @@ EsliteMonitorBase (ABC)
   │     └─ 呼叫 book_exhibits API → 遞迴解析書展 JSON → ~6 秒/輪 → 580 輪/次
   │
   └─ ProductMonitor（MONITOR_MODE=product）
-        └─ 逐一呼叫 products/{guid} API → ~7 秒/輪 → 500 輪/次
+        └─ 逐一呼叫 products/{guid} API → ~6 秒/輪 → 580 輪/次
 ```
 
 兩個模式分別由獨立 GitHub Actions workflow 觸發，各使用獨立的 `ORDER_STATE_FILE`（避免下單狀態互相干擾）：
@@ -244,7 +244,7 @@ EsliteMonitorBase (ABC)
 | Workflow | MONITOR_MODE | CHECK_ROUNDS | ORDER_STATE_FILE |
 |---|---|---|---|
 | `eslite_monitor.yml` | `exhibition` | 580 | `eslite_order_state.json` |
-| `eslite_product_monitor.yml` | `product` | 500 | `eslite_product_order_state.json` |
+| `eslite_product_monitor.yml` | `product` | 580 | `eslite_product_order_state.json` |
 
 兩個 workflow 共用同一個 `eslite_storage_state.json`（session），以 `eslite-session-` cache key 共享。
 
@@ -279,8 +279,8 @@ EsliteMonitorBase (ABC)
 
 | | 舊版（含個別追蹤，混用） | ExhibitionMonitor | ProductMonitor |
 |---|---|---|---|
-| 每輪耗時 | ~9.4 秒（實測） | ~6 秒 | ~7 秒 |
-| 60 分鐘可跑 | ~380 輪 | ~580 輪 | ~500 輪 |
+| 每輪耗時 | ~9.4 秒（實測） | ~6 秒 | ~6 秒 |
+| 60 分鐘可跑 | ~380 輪 | ~580 輪 | ~580 輪 |
 
 OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒。
 
@@ -460,7 +460,7 @@ AUTO_CHECKOUT=true
 | `ESLITE_API_URL` | CU202503-00091 展覽 API | ExhibitionMonitor 監控目標（可替換為其他誠品活動頁 API） |
 | `ESLITE_EXTRA_PRODUCTS` | `10022136782683190211005` | ProductMonitor 追蹤的商品 GUID，逗號分隔 |
 | `ESLITE_SKIP_KEYWORDS` | `UX-14` | 略過的商品名稱關鍵字，逗號分隔 |
-| `CHECK_ROUNDS` | `1` | 執行輪數（書展 580，個別商品 500） |
+| `CHECK_ROUNDS` | `1` | 執行輪數（書展與個別商品皆為 580） |
 | `CHECKOUT_MAX` | `3` | 每次最多加入購物車的商品件數 |
 | `AUTO_CHECKOUT` | `true` | 設為 `false` 可停用自動下單（僅通知） |
 | `HEADLESS` | `true` | 設為 `false` 可在本機手動完成 reCAPTCHA |
