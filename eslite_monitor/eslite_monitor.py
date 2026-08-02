@@ -82,6 +82,9 @@ class EsliteMonitorBase(ABC):
         _recip_raw = [r.strip() for r in os.environ.get("ORDER_RECIPIENT", "").split(",") if r.strip()]
         self.ORDER_RECIPIENTS = _recip_raw or self.GMAIL_RECIPIENTS[:1]
 
+        # 記憶體內追蹤（僅本次執行有效），防止同一 run 內重複清空購物車
+        self._cart_added_guids: set = set()
+
     # ── 抽象介面 ──────────────────────────────
 
     @abstractmethod
@@ -519,9 +522,12 @@ class EsliteMonitorBase(ABC):
         結帳失敗時商品仍留購物車，使用者可手動結帳。
         """
         ordered  = self._load_order_state()
-        to_order = [p for p in in_stock_products if p["guid"] not in ordered][:self.CHECKOUT_MAX]
+        to_order = [
+            p for p in in_stock_products
+            if p["guid"] not in ordered and p["guid"] not in self._cart_added_guids
+        ][:self.CHECKOUT_MAX]
         if not to_order:
-            log.info("所有有庫存商品均已在訂單狀態中，跳過下單")
+            log.info("所有有庫存商品均已下單或本輪已加入購物車，跳過")
             return
 
         log.info(f"準備加入購物車 {len(to_order)} 件（CHECKOUT_MAX={self.CHECKOUT_MAX}）")
@@ -540,20 +546,19 @@ class EsliteMonitorBase(ABC):
             log.warning("所有商品加入購物車均失敗，跳過結帳")
             return
 
+        # 記憶體記錄，防止同一 run 內後續輪次再次清空購物車
+        for p in added:
+            self._cart_added_guids.add(p["guid"])
+
         self._notify_cart_added(added)
         log.info(f"已加入購物車 {len(added)} 件，開始自動結帳...")
-
-        # 立即寫入 cart_pending，防止下一輪清空購物車再重加
-        now_str = datetime.now(self.TW_TZ).isoformat()
-        for p in added:
-            ordered[p["guid"]] = {"status": "cart_pending", "added_at": now_str}
-        self._save_order_state(ordered)
 
         order_id = self._checkout(page)
         if order_id:
             self._notify_order(added, order_id)
+            now_str = datetime.now(self.TW_TZ).isoformat()
             for p in added:
-                ordered[p["guid"]] = {"status": "ordered", "order_id": order_id, "ordered_at": now_str}
+                ordered[p["guid"]] = {"order_id": order_id, "ordered_at": now_str}
             self._save_order_state(ordered)
         else:
             log.warning("自動結帳失敗，商品已留在購物車，請點擊通知信中連結手動結帳")

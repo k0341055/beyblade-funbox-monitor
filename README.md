@@ -37,11 +37,11 @@ flowchart TD
     COOL2 -->|同輪觸發| BUY["多帳號平行下單\nThreadPoolExecutor\n7-11 貨到付款"]
     NOCD -->|同輪觸發| ECART["eslite 自動登入\n→ 清空購物車\n→ 加入購物車"]
 
-    ECART -->|加入成功| CPEND["寫入 order_state\n(cart_pending)\n下輪不再清購物車"]
+    ECART -->|加入成功| CPEND["記憶體記錄 guid\n同一 run 不再清購物車\n（下次 run 重置）"]
     CPEND --> CNOTIF["購物車通知\n→ ORDER_RECIPIENTS\n含一鍵結帳連結"]
     CPEND -->|嘗試自動結帳| CHECKOUT{"結帳結果"}
-    CHECKOUT -->|成功| ONOTIF["訂單確認通知\n→ ORDER_RECIPIENTS\norder_state → ordered"]
-    CHECKOUT -->|失敗| MANUAL["商品留購物車\n請手動結帳"]
+    CHECKOUT -->|成功| ONOTIF["訂單確認通知\n→ ORDER_RECIPIENTS\n寫入 order_state（永久去重）"]
+    CHECKOUT -->|失敗| MANUAL["商品留購物車\n請手動結帳\n下次 run 可重新嘗試"]
 ```
 
 ---
@@ -306,9 +306,9 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
   │     ├─ 等待 SPA 渲染（wait_for_selector，非固定 timeout）
   │     └─ 若 qty > 1，先填數量輸入框再點按鈕
   │
-  ├─ 【立即寫入 order_state（status: cart_pending）】
-  │     └─ 下一輪偵測到此 guid 已在 order_state → 跳過清購物車 + 跳過重加
-  │         （保護手動結帳視窗，避免購物車被清空）
+  ├─ 【記憶體記錄已加入的 guid（_cart_added_guids）】
+  │     └─ 同一 run 內後續輪次偵測到此 guid → 跳過，不清購物車
+  │         （下次 run 開始時記憶體重置，若誠品已自動清空購物車則可重新嘗試）
   │
   ├─ 【立即發送購物車通知】→ ORDER_RECIPIENTS（含一鍵結帳連結）
   │
@@ -319,22 +319,19 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
         ├─ 點「ATM轉帳」→ 點「確認結帳」
         ├─ wait_for_url "**/cart/step3**"
         │
-        ├─ 成功 → 發訂單確認通知 → order_state 更新為 status: ordered（永久去重）
-        └─ 失敗 → log 警告（商品留購物車，order_state 維持 cart_pending，不再重試）
+        ├─ 成功 → 發訂單確認通知 → 寫入 order_state（永久去重）
+        └─ 失敗 → log 警告（商品留購物車；下次 run 若庫存仍在可重新嘗試）
 ```
 
 > 誠品購物車**跨裝置、跨登入持久存在**，就算自動結帳失敗，商品仍留在購物車中，使用者可直接點購物車通知信中的連結手動完成結帳。
 
 ### 下單去重
 
-`eslite_order_state.json` 以 `product_guid` 為 key，記錄兩種狀態：
+`eslite_order_state.json` 只記錄**自動結帳成功**的商品 guid（永久去重）。
 
-| status | 觸發時機 | 後續行為 |
-|---|---|---|
-| `cart_pending` | 加入購物車成功後**立即**寫入 | 下一輪跳過此商品（不清購物車、不重加），保護手動結帳視窗 |
-| `ordered` | 自動結帳成功後更新 | 永久去重，即使商品重新上架也不再下單 |
+同一次執行（run）內，已加入購物車的 guid 記錄在記憶體（`_cart_added_guids`），不持久化——這樣若誠品因庫存歸零自動清空購物車，下次 run 開始時記憶體重置，程式可以重新偵測並加入。
 
-> 若想讓程式重新嘗試（例如手動結帳後又想自動化），刪除 `eslite_order_state.json` 中對應的條目即可。
+> 若想讓程式重新嘗試已成功下單的商品，刪除 `eslite_order_state.json` 中對應的條目即可。
 
 ### Email 通知格式
 
