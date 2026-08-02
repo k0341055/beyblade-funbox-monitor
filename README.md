@@ -35,9 +35,9 @@ flowchart TD
     NOCD --> MAIL3["Gmail → 全體收件人\n含一鍵結帳連結"]
 
     COOL2 -->|同輪觸發| BUY["多帳號平行下單\nThreadPoolExecutor\n7-11 貨到付款"]
-    NOCD -->|同輪觸發| ECART["eslite 自動登入\n→ 清空購物車\n→ 加入購物車"]
+    NOCD -->|同輪觸發\nguid 不在記憶體且未下單| ECART["eslite 自動登入\n→ 清空購物車\n→ 加入購物車"]
 
-    ECART -->|加入成功| CPEND["記憶體記錄 guid\n同一 run 不再清購物車\n（下次 run 重置）"]
+    ECART -->|加入成功| CPEND["記憶體記錄 guid\n同一 run 後續輪次跳過\n不再清購物車"]
     CPEND --> CNOTIF["購物車通知\n→ ORDER_RECIPIENTS\n含一鍵結帳連結"]
     CPEND -->|嘗試自動結帳| CHECKOUT{"結帳結果"}
     CHECKOUT -->|成功| ONOTIF["訂單確認通知\n→ ORDER_RECIPIENTS\n寫入 order_state（永久去重）"]
