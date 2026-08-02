@@ -37,8 +37,11 @@ flowchart TD
     COOL2 -->|同輪觸發| BUY["多帳號平行下單\nThreadPoolExecutor\n7-11 貨到付款"]
     NOCD -->|同輪觸發| ECART["eslite 自動登入\n→ 清空購物車\n→ 加入購物車"]
 
-    ECART -->|加入成功（不論結帳）| CNOTIF["購物車通知\n→ ORDER_RECIPIENTS\n含一鍵結帳連結"]
-    ECART -->|自動結帳成功| ONOTIF["訂單確認通知\n→ ORDER_RECIPIENTS"]
+    ECART -->|加入成功| CPEND["寫入 order_state\n(cart_pending)\n下輪不再清購物車"]
+    CPEND --> CNOTIF["購物車通知\n→ ORDER_RECIPIENTS\n含一鍵結帳連結"]
+    CPEND -->|嘗試自動結帳| CHECKOUT{"結帳結果"}
+    CHECKOUT -->|成功| ONOTIF["訂單確認通知\n→ ORDER_RECIPIENTS\norder_state → ordered"]
+    CHECKOUT -->|失敗| MANUAL["商品留購物車\n請手動結帳"]
 ```
 
 ---
@@ -303,8 +306,11 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
   │     ├─ 等待 SPA 渲染（wait_for_selector，非固定 timeout）
   │     └─ 若 qty > 1，先填數量輸入框再點按鈕
   │
+  ├─ 【立即寫入 order_state（status: cart_pending）】
+  │     └─ 下一輪偵測到此 guid 已在 order_state → 跳過清購物車 + 跳過重加
+  │         （保護手動結帳視窗，避免購物車被清空）
+  │
   ├─ 【立即發送購物車通知】→ ORDER_RECIPIENTS（含一鍵結帳連結）
-  │     （此時商品已在購物車，就算後續結帳失敗也可手動結帳）
   │
   └─ checkout()
         ├─ goto /cart → 點結帳 → 選「誠品門市取貨」
@@ -313,15 +319,22 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
         ├─ 點「ATM轉帳」→ 點「確認結帳」
         ├─ wait_for_url "**/cart/step3**"
         │
-        ├─ 成功 → 發訂單確認通知 → 寫入 eslite_order_state.json（永久去重）
-        └─ 失敗 → log 警告（商品仍留購物車，購物車通知已發出）
+        ├─ 成功 → 發訂單確認通知 → order_state 更新為 status: ordered（永久去重）
+        └─ 失敗 → log 警告（商品留購物車，order_state 維持 cart_pending，不再重試）
 ```
 
 > 誠品購物車**跨裝置、跨登入持久存在**，就算自動結帳失敗，商品仍留在購物車中，使用者可直接點購物車通知信中的連結手動完成結帳。
 
 ### 下單去重
 
-`eslite_order_state.json` 記錄已成功下單的 `product_guid`，**永久不重複下單**（即使商品重新上架）。只有手動刪除此檔案才會重置。
+`eslite_order_state.json` 以 `product_guid` 為 key，記錄兩種狀態：
+
+| status | 觸發時機 | 後續行為 |
+|---|---|---|
+| `cart_pending` | 加入購物車成功後**立即**寫入 | 下一輪跳過此商品（不清購物車、不重加），保護手動結帳視窗 |
+| `ordered` | 自動結帳成功後更新 | 永久去重，即使商品重新上架也不再下單 |
+
+> 若想讓程式重新嘗試（例如手動結帳後又想自動化），刪除 `eslite_order_state.json` 中對應的條目即可。
 
 ### Email 通知格式
 

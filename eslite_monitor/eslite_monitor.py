@@ -543,12 +543,17 @@ class EsliteMonitorBase(ABC):
         self._notify_cart_added(added)
         log.info(f"已加入購物車 {len(added)} 件，開始自動結帳...")
 
+        # 立即寫入 cart_pending，防止下一輪清空購物車再重加
+        now_str = datetime.now(self.TW_TZ).isoformat()
+        for p in added:
+            ordered[p["guid"]] = {"status": "cart_pending", "added_at": now_str}
+        self._save_order_state(ordered)
+
         order_id = self._checkout(page)
         if order_id:
             self._notify_order(added, order_id)
-            now_str = datetime.now(self.TW_TZ).isoformat()
             for p in added:
-                ordered[p["guid"]] = {"order_id": order_id, "ordered_at": now_str}
+                ordered[p["guid"]] = {"status": "ordered", "order_id": order_id, "ordered_at": now_str}
             self._save_order_state(ordered)
         else:
             log.warning("自動結帳失敗，商品已留在購物車，請點擊通知信中連結手動結帳")
