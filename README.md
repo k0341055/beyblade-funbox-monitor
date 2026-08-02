@@ -381,8 +381,8 @@ gh secret set ESLITE_STORAGE_STATE_B64 \
 | `ESLITE_ACCOUNT` | 誠品 | 誠品登入帳號（手機號） |
 | `ESLITE_PASSWORD` | 誠品 | 誠品登入密碼 |
 | `ORDER_RECIPIENT` | 誠品 | 下單/購物車通知收件人（逗號分隔） |
-| `CHECKOUT_CITY` | 誠品 | 取貨城市（如 `新竹市`） |
-| `CHECKOUT_STORE_CODE` | 誠品 | 門市代碼（如 `B060` 巨城） |
+| `CHECKOUT_CITY` | 誠品 | 取貨城市（如 `XX市`） |
+| `CHECKOUT_STORE_CODE` | 誠品 | 門市代碼（如 `B0XX` XX門市） |
 | `ESLITE_EXTRA_PRODUCTS` | 誠品個別商品 | 要追蹤的商品 GUID，逗號分隔（ProductMonitor 使用） |
 | `ESLITE_STORAGE_STATE_B64` | 誠品 | Session 備援（base64 編碼的 storage_state.json） |
 
@@ -425,8 +425,8 @@ GMAIL_RECIPIENTS=a@gmail.com,b@gmail.com
 ESLITE_ACCOUNT=0900000000
 ESLITE_PASSWORD=YourPassword
 ORDER_RECIPIENT=your@gmail.com
-CHECKOUT_CITY=新竹市
-CHECKOUT_STORE_CODE=B060
+CHECKOUT_CITY=XXCity
+CHECKOUT_STORE_CODE=B0XX
 CHECK_ROUNDS=1
 HEADLESS=false
 AUTO_CHECKOUT=true
