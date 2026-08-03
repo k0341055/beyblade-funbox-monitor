@@ -14,7 +14,7 @@ env:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 62
+    timeout-minutes: 65
 
     steps:
       - name: Checkout code
@@ -58,7 +58,7 @@ jobs:
           GMAIL_SENDER:      ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD:    ${{ secrets.GMAIL_PASSWORD }}
           GMAIL_RECIPIENTS:  ${{ secrets.GMAIL_RECIPIENTS }}
-          CHECK_ROUNDS:      ${{ inputs.check_rounds || '190' }}
+          CHECK_ROUNDS:      ${{ inputs.check_rounds || '480' }}
           STATE_FILE:        'seen_products.json'
         working-directory: 1999_monitor
         run: python 1999_monitor.py
