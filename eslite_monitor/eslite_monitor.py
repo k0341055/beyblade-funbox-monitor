@@ -55,9 +55,10 @@ class EsliteMonitorBase(ABC):
     def __init__(self):
         self.TW_TZ = timezone(timedelta(hours=8))
 
+        _extra_env = os.environ.get("ESLITE_EXTRA_PRODUCTS", "").strip()
         self.EXTRA_PRODUCT_GUIDS = [
             g.strip()
-            for g in os.environ.get("ESLITE_EXTRA_PRODUCTS", "10022136782683190211005").split(",")
+            for g in (_extra_env or "10022136782683190211005").split(",")
             if g.strip()
         ]
         self.CHECK_ROUNDS = int(os.environ.get("CHECK_ROUNDS", "1"))
