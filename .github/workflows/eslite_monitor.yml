@@ -1,7 +1,12 @@
 name: 誠品 Beyblade X Monitor
 
 on:
-  workflow_dispatch:   # 由 cron-job.org 透過 GitHub API 觸發
+  workflow_dispatch:
+    inputs:
+      check_rounds:
+        description: '執行輪數（留空使用預設值 610）'
+        required: false
+        default: ''
 
 jobs:
   monitor:
@@ -78,7 +83,7 @@ jobs:
           AUTO_CHECKOUT:        'true'
           HEADLESS:             'true'
           MONITOR_MODE:         'exhibition'
-          CHECK_ROUNDS:         '610'
+          CHECK_ROUNDS:         ${{ inputs.check_rounds || '610' }}
           CHECKOUT_MAX:         '3'
           ORDER_STATE_FILE:     'eslite_order_state.json'
           STORAGE_STATE_FILE:   'eslite_storage_state.json'
