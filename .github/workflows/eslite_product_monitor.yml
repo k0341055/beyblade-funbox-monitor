@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       check_rounds:
-        description: '執行輪數（留空使用預設值 580）'
+        description: '執行輪數（留空使用預設值 460）'
         required: false
         default: ''
 
@@ -83,7 +83,7 @@ jobs:
           AUTO_CHECKOUT:        'true'
           HEADLESS:             'true'
           MONITOR_MODE:         'product'
-          CHECK_ROUNDS:         ${{ inputs.check_rounds || '580' }}
+          CHECK_ROUNDS:         ${{ inputs.check_rounds || '460' }}
           CHECKOUT_MAX:         '3'
           ORDER_STATE_FILE:     'eslite_product_order_state.json'
           STORAGE_STATE_FILE:   'eslite_storage_state.json'
