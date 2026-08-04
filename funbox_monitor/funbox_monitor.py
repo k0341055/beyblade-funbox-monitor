@@ -162,10 +162,26 @@ def _parse_ts(ts_str: str) -> datetime:
 
 
 def fetch_products() -> list:
-    resp = requests.get(API_URL, timeout=30)
-    resp.raise_for_status()
-    raw = resp.json()
-    # 單一商品端點回傳 dict，集合端點回傳 list
+    raw = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(
+                API_URL,
+                headers={"User-Agent": _UA, "Accept": "application/json"},
+                timeout=(5, 15),
+            )
+            resp.raise_for_status()
+            raw = resp.json()
+            break
+        except (requests.ConnectTimeout, requests.ConnectionError, requests.ReadTimeout) as e:
+            if attempt < 3:
+                wait = random.randint(2, 4)
+                log.warning(f"Funbox API 連線失敗 ({attempt}/3)：{type(e).__name__}，{wait} 秒後重試")
+                time.sleep(wait)
+            else:
+                log.warning(f"Funbox API 連續 3 次連線失敗，本輪跳過：{e}")
+                raise
+
     if isinstance(raw, dict):
         raw = [raw]
 
@@ -179,7 +195,6 @@ def fetch_products() -> list:
         href = item.get("url", "")
         title = item.get("title", "(未知商品)").strip()
         price = f"NT${int(variant.get('price', 0))}"
-        # qc = 每筆訂單加購上限（null 表示無限制）
         raw_qc = variant.get("qc")
         qty_cap = int(raw_qc) if raw_qc is not None else None
 
@@ -787,12 +802,19 @@ def check_once() -> bool:
         save_state(notified, purchased, attempts)
         return True
 
+    except requests.Timeout as e:
+        log.warning(f"Funbox API 連線逾時：{e}")
+        return False
+    except requests.ConnectionError as e:
+        log.warning(f"Funbox API 連線失敗：{e}")
+        return False
     except requests.HTTPError as e:
-        log.error(f"HTTP 錯誤：{e}")
+        status = e.response.status_code if e.response is not None else "未知"
+        log.warning(f"Funbox API HTTP 錯誤：HTTP {status} | {e}")
         return False
-    except Exception as e:
-        log.error(f"執行例外：{e}", exc_info=True)
-        return False
+    except Exception:
+        log.exception("check_once 發生非預期程式錯誤")
+        raise
 
 
 # ─────────────────────────────────────────────
@@ -806,11 +828,11 @@ def main():
         try:
             if CHECK_ROUNDS > 1:
                 log.info(f"── 第 {round_num}/{CHECK_ROUNDS} 輪 ──")
-            check_once()
+            success = check_once()
+            if not success:
+                log.warning(f"第 {round_num}/{CHECK_ROUNDS} 輪偵測失敗，下一輪自動重試")
         except Exception as error:
-            log.error(
-                f"第 {round_num}/{CHECK_ROUNDS} 輪執行失敗：{error}"
-            )
+            log.exception(f"第 {round_num}/{CHECK_ROUNDS} 輪發生非預期錯誤：{error}")
         if round_num < CHECK_ROUNDS:
             wait = random.randint(3, 5)
             log.info(f"等待 {wait} 秒後進行下一輪...")
