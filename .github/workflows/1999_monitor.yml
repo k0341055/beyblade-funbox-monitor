@@ -58,7 +58,7 @@ jobs:
           GMAIL_SENDER:      ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD:    ${{ secrets.GMAIL_PASSWORD }}
           GMAIL_RECIPIENTS:  ${{ secrets.GMAIL_RECIPIENTS }}
-          CHECK_ROUNDS:      ${{ inputs.check_rounds || '50' }}
+          CHECK_ROUNDS:      ${{ inputs.check_rounds || '15' }}
           STATE_FILE:        'seen_products.json'
         working-directory: 1999_monitor
         run: python 1999_monitor.py
