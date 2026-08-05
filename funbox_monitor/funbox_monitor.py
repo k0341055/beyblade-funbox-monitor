@@ -178,7 +178,7 @@ def fetch_products() -> list:
         try:
             resp = requests.get(
                 API_URL,
-                headers={"User-Agent": _UA, "Accept": "lication/json"},
+                headers={"User-Agent": _UA, "Accept": "application/json"},
                 timeout=(5, 15),
             )
             resp.raise_for_status()
