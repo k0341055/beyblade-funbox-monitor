@@ -167,7 +167,7 @@ def fetch_products() -> list:
         try:
             resp = requests.get(
                 API_URL,
-                headers={"User-Agent": _UA, "Accept": "application/json"},
+                headers={"User-Agent": _UA, "Accept": "lication/json"},
                 timeout=(5, 15),
             )
             resp.raise_for_status()
@@ -198,7 +198,7 @@ def fetch_products() -> list:
         raw_qc = variant.get("qc")
         qty_cap = int(raw_qc) if raw_qc is not None else None
 
-        products.append({
+        products.end({
             "href": href,
             "url": f"{BASE_URL}{href}" if href.startswith("/") else href,
             "title": title,
@@ -557,7 +557,7 @@ def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
         log.warning("未設定任何 FUNBOX 帳號，跳過自動購買")
         return {}
 
-    non_app = [p for p in products if "APP" not in p["title"].upper()]
+    non_app = [p for p in products if "APP" or "BX-33" or "BX-26" or "暴風天馬" or "銀牙烈虎" not in p["title"].upper()]
     if not non_app:
         log.info("所有商品均為 APP 限定，略過自動購買")
         return {}
