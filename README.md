@@ -428,7 +428,7 @@ GMAIL_PASSWORD=xxxx xxxx xxxx xxxx
 GMAIL_RECIPIENTS=your@gmail.com
 CHECK_ROUNDS=1
 HEADLESS=false
-# SEARCH_URL=https://www.1999.co.jp/search?typ1_c=100&cat=&searchkey=tomica&sortid=7&soldout=0
+# SEARCH_URL={product_url}
 ```
 
 **`funbox_monitor/.env`**：
