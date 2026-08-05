@@ -48,6 +48,15 @@ jobs:
           restore-keys: |
             funbox-seen-
 
+      - name: Test Funbox connection
+        run: |
+          echo "=== DNS ==="
+          nslookup shop.funbox.com.tw || true
+          echo "=== HTTPS ==="
+          curl -sv --connect-timeout 5 --max-time 15 \
+            "https://shop.funbox.com.tw/collections/%E6%88%B0%E9%AC%A5%E9%99%80%E8%9E%BA/products.json" \
+            -o /dev/null 2>&1 | grep -E "Connected|HTTP|< HTTP|curl:" || true
+
       - name: Run Funbox monitor
         env:
           GMAIL_SENDER:      ${{ secrets.GMAIL_SENDER }}

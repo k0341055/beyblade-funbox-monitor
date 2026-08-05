@@ -73,6 +73,17 @@ _RANDOM_KEYWORDS = ["隨機強化組", "抽抽包", "RANDOM BOOSTER", "RANDOM"]
 # Playwright 結帳頁若出現以下文字，代表 CYBERBIZ 在結帳層級攔截限購
 _CHECKOUT_LIMIT_TEXTS = ["最多只能購買", "達購買上限", "超過購買限制", "超出限購", "purchase limit"]
 
+# ── 略過通知與自動購買的商品關鍵字 ──────────────────
+# 商品名稱含以下任一關鍵字 → 整輪靜默略過（不通知、不下單）
+# APP 限定商品由 auto_buy_all 另行處理（仍會通知），故不需列於此
+SKIP_KEYWORDS: list[str] = [
+    "BX-33",
+    "BX-26",
+    "暴風天馬",
+    "銀牙烈虎",
+    "烈焰飛鳳",
+]
+
 
 def is_random_product(p: dict) -> bool:
     """隨機強化組 / 抽抽包類商品，每輪都嘗試購買（限購較寬，通常 3 個）。"""
@@ -745,6 +756,18 @@ def notify_products(products: list, account_results: dict = None) -> bool:
 def check_once() -> bool:
     try:
         products = fetch_products()
+
+        # 略過 SKIP_KEYWORDS 商品（不通知、不下單）
+        if SKIP_KEYWORDS:
+            before = len(products)
+            products = [
+                p for p in products
+                if not any(kw.upper() in p["title"].upper() for kw in SKIP_KEYWORDS)
+            ]
+            skipped = before - len(products)
+            if skipped:
+                log.info(f"略過 {skipped} 件符合 SKIP_KEYWORDS 的商品")
+
         now = datetime.now(TW_TZ)
         cutoff = now - NOTIFY_COOLDOWN
 
