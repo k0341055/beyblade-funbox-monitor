@@ -198,7 +198,7 @@ def fetch_products() -> list:
         raw_qc = variant.get("qc")
         qty_cap = int(raw_qc) if raw_qc is not None else None
 
-        products.end({
+        products.append({
             "href": href,
             "url": f"{BASE_URL}{href}" if href.startswith("/") else href,
             "title": title,
