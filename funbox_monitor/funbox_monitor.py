@@ -19,6 +19,7 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
 
 load_dotenv()
 
@@ -67,11 +68,27 @@ _UA = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+# 全域 Session — 讓 750 輪之間重用 TCP/TLS connection
+FUNBOX_SESSION = requests.Session()
+FUNBOX_SESSION.headers.update({
+    "User-Agent": _UA,
+    "Accept": "application/json",
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+    "Referer": COLLECTION_URL,
+})
+FUNBOX_SESSION.mount(
+    "https://",
+    HTTPAdapter(pool_connections=2, pool_maxsize=4, max_retries=0),
+)
+
 # 隨機強化組 / 抽抽包關鍵字（這類商品通常限購 3，其他一般款限購 1）
 _RANDOM_KEYWORDS = ["隨機強化組", "抽抽包", "RANDOM BOOSTER", "RANDOM"]
 
 # Playwright 結帳頁若出現以下文字，代表 CYBERBIZ 在結帳層級攔截限購
 _CHECKOUT_LIMIT_TEXTS = ["最多只能購買", "達購買上限", "超過購買限制", "超出限購", "purchase limit"]
+
+# 結帳時商品已售完（庫存在加入購物車後被搶走，URL 不會變但頁面有提示文字）
+_CHECKOUT_STOCK_OUT_TEXTS = ["庫存不足", "數量不足", "已無庫存", "商品已售完", "無法結帳", "庫存已不足", "商品已下架", "out of stock"]
 
 # ── 略過通知與自動購買的商品關鍵字 ──────────────────
 # 商品名稱含以下任一關鍵字 → 整輪靜默略過（不通知、不下單）
@@ -174,38 +191,52 @@ def _parse_ts(ts_str: str) -> datetime:
 
 def fetch_products() -> list:
     raw = None
-    for attempt in range(1, 4):
+    last_error = None
+
+    for attempt in range(1, 5):
         try:
-            resp = requests.get(
-                API_URL,
-                headers={"User-Agent": _UA, "Accept": "application/json"},
-                timeout=(5, 15),
-            )
+            resp = FUNBOX_SESSION.get(API_URL, timeout=(8, 15))
+
+            if resp.status_code in (429, 500, 502, 503, 504):
+                if attempt < 4:
+                    retry_after = resp.headers.get("Retry-After")
+                    wait = int(retry_after) if (retry_after and retry_after.isdigit()) else (2 ** attempt) + random.uniform(0, 1)
+                    log.warning(f"Funbox API HTTP {resp.status_code} ({attempt}/4)，{wait:.1f} 秒後重試")
+                    time.sleep(wait)
+                    continue
+
             resp.raise_for_status()
             raw = resp.json()
             break
-        except (requests.ConnectTimeout, requests.ConnectionError, requests.ReadTimeout) as e:
-            if attempt < 3:
-                wait = random.randint(2, 4)
-                log.warning(f"Funbox API 連線失敗 ({attempt}/3)：{type(e).__name__}，{wait} 秒後重試")
+
+        except (requests.ConnectTimeout, requests.ReadTimeout, requests.ConnectionError) as e:
+            last_error = e
+            if attempt < 4:
+                wait = (2 ** (attempt - 1)) + random.uniform(0, 1)
+                log.warning(f"Funbox API 連線失敗 ({attempt}/4)：{type(e).__name__}，{wait:.1f} 秒後重試")
                 time.sleep(wait)
             else:
-                log.warning(f"Funbox API 連續 3 次連線失敗，本輪跳過：{e}")
-                raise
+                log.warning(f"Funbox API 連續 {attempt} 次連線失敗，本輪跳過：{e}")
+
+    if raw is None:
+        raise last_error or requests.ConnectionError("Funbox API 未取得資料")
 
     if isinstance(raw, dict):
-        raw = [raw]
+        raw = raw.get("products", [raw])
+
+    if not isinstance(raw, list):
+        raise ValueError(f"Funbox API 格式異常：{type(raw).__name__}")
 
     products = []
     for item in raw:
         variant = (item.get("variants") or [{}])[0]
-        inventory = int(variant.get("inventory_quantity", 0))
+        inventory = int(variant.get("inventory_quantity", 0) or 0)
         if inventory <= 0:
             continue
 
         href = item.get("url", "")
         title = item.get("title", "(未知商品)").strip()
-        price = f"NT${int(variant.get('price', 0))}"
+        price = f"NT${int(variant.get('price', 0) or 0)}"
         raw_qc = variant.get("qc")
         qty_cap = int(raw_qc) if raw_qc is not None else None
 
@@ -514,13 +545,17 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
                     log.warning(f"[{email}] 觸發非預期 3DS：{url}")
                     br.close()
                     return "3ds_pending"
-                # CYBERBIZ 在結帳層級才顯示的限購錯誤（URL 不會變，需掃描頁面文字）
+                # URL 不變時掃描頁面文字，偵測限購攔截或商品售完
                 try:
                     body_text = page.locator("body").inner_text(timeout=500)
                     if any(kw in body_text for kw in _CHECKOUT_LIMIT_TEXTS):
                         log.warning(f"[{email}] 結帳被限購攔截（頁面偵測）：{body_text[:300]}")
                         br.close()
                         return "checkout_limited"
+                    if any(kw in body_text for kw in _CHECKOUT_STOCK_OUT_TEXTS):
+                        log.warning(f"[{email}] 結帳時商品已售完（頁面偵測）：{body_text[:300]}")
+                        br.close()
+                        return "stock_out"
                 except Exception:
                     pass
 
@@ -568,7 +603,7 @@ def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
         log.warning("未設定任何 FUNBOX 帳號，跳過自動購買")
         return {}
 
-    non_app = [p for p in products if "APP" or "BX-33" or "BX-26" or "暴風天馬" or "銀牙烈虎" not in p["title"].upper()]
+    non_app = [p for p in products if "APP" not in p["title"].upper()]
     if not non_app:
         log.info("所有商品均為 APP 限定，略過自動購買")
         return {}
@@ -632,6 +667,7 @@ _CHECKOUT_LABEL = {
     "payment_failed":   "❌ 訂單已建立但付款失敗（show_failed），請手動完成付款",
     "3ds_pending":      "⚠ 訂單已建立（需完成銀行 3DS 驗證才能付款）",
     "checkout_limited": "🚫 結帳時被 CYBERBIZ 限購攔截，請手動調整數量後結帳",
+    "stock_out":        "⚡ 結帳時商品已售完（已被其他人搶走）",
     "cart":             "🛒 商品已在購物車，請手動完成結帳",
     "failed":           "❌ 自動購買失敗，請手動下單",
 }
@@ -847,13 +883,23 @@ def check_once() -> bool:
 
 def main():
     log.info(f"Funbox 商品偵測器 | 輪數：{CHECK_ROUNDS} | 帳號數：{len(FUNBOX_ACCOUNTS)}")
+    consecutive_failures = 0
     for round_num in range(1, CHECK_ROUNDS + 1):
         try:
             if CHECK_ROUNDS > 1:
                 log.info(f"── 第 {round_num}/{CHECK_ROUNDS} 輪 ──")
             success = check_once()
-            if not success:
-                log.warning(f"第 {round_num}/{CHECK_ROUNDS} 輪偵測失敗，下一輪自動重試")
+            if success:
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                log.warning(f"連續偵測失敗 {consecutive_failures}/3")
+                if consecutive_failures >= 3:
+                    log.error(
+                        "Funbox 連續 3 輪無法連線，判定目前 GitHub runner 網路異常，"
+                        "提早結束本次 Job，交由下次排程取得新 runner"
+                    )
+                    break
         except Exception as error:
             log.exception(f"第 {round_num}/{CHECK_ROUNDS} 輪發生非預期錯誤：{error}")
         if round_num < CHECK_ROUNDS:

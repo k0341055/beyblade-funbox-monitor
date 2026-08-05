@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       check_rounds:
-        description: '執行輪數（留空使用預設值 415）'
+        description: '執行輪數（留空使用預設值 50，約 5 分鐘）'
         required: false
         default: ''
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 65
+    timeout-minutes: 15
 
     steps:
       - name: Checkout code
@@ -83,7 +83,7 @@ jobs:
           AUTO_CHECKOUT:        'true'
           HEADLESS:             'true'
           MONITOR_MODE:         'product'
-          CHECK_ROUNDS:         ${{ inputs.check_rounds || '415' }}
+          CHECK_ROUNDS:         ${{ inputs.check_rounds || '50' }}
           CHECKOUT_MAX:         '3'
           ORDER_STATE_FILE:     'eslite_product_order_state.json'
           STORAGE_STATE_FILE:   'eslite_storage_state.json'

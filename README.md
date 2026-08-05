@@ -1,13 +1,13 @@
 # 1999 X & Funbox & 誠品 商品偵測器
 
-自動偵測三個電商的 Beyblade X 商品庫存，並在有庫存時透過 Gmail 發送通知。Funbox 與誠品支援自動下單。每小時由 cron-job.org 觸發一次 GitHub Actions，每次執行持續監控約 45~60 分鐘。
+自動偵測三個電商的 Beyblade X 商品庫存，並在有庫存時透過 Gmail 發送通知。Funbox 與誠品支援自動下單。由 cron-job.org 每 5 分鐘觸發一次 GitHub Actions，每次啟動全新 VM 執行約 5 分鐘的監控，確保任何 runner 網路異常最多影響一個 5 分鐘窗口。
 
 ### 術語定義
 
 | 術語 | 說明 |
 |---|---|
-| **Run（執行）** | cron-job.org 每小時觸發一次 GitHub Actions，啟動一個 ubuntu VM，執行整個監控程式直到結束。每次 run 約 58 分鐘，結束後 VM 銷毀，所有記憶體狀態清空。 |
-| **Round（輪）** | Run 內的一次偵測循環：呼叫 API → 解析庫存 → 通知／下單。每輪約 6 秒，一個 run 包含 580 輪。 |
+| **Run（執行）** | cron-job.org 每 5 分鐘觸發一次 GitHub Actions，啟動一個全新 ubuntu VM，執行整個監控程式直到結束。每次 run 約 5 分鐘，結束後 VM 銷毀，所有記憶體狀態清空。若 Funbox 連續 3 輪連線失敗，程式會提早結束 run（放棄問題 runner），交由下次排程取得新 VM。 |
+| **Round（輪）** | Run 內的一次偵測循環：呼叫 API → 解析庫存 → 通知／下單。每輪約 6 秒，一個 run 包含約 50 輪。 |
 
 ---
 
@@ -15,17 +15,17 @@
 
 ```mermaid
 flowchart TD
-    CRON["cron-job.org\n每小時 POST → GitHub API\n（三個獨立任務）"]
+    CRON["cron-job.org\n每 5 分鐘 POST → GitHub API\n（四個獨立任務）"]
 
     CRON -->|workflow_dispatch| GA1["GitHub Actions\n1999_monitor\nubuntu VM"]
     CRON -->|workflow_dispatch| GA2["GitHub Actions\nfunbox_monitor\nubuntu VM"]
     CRON -->|workflow_dispatch| GA3["GitHub Actions\neslite_monitor\nubuntu VM"]
     CRON -->|workflow_dispatch| GA4["GitHub Actions\neslite_product_monitor\nubuntu VM"]
 
-    GA1 --> PW1["Playwright async\n190 輪 / 次\n隨機 UA + viewport"]
-    GA2 --> REQ["requests 登入/加購\n+ Playwright 結帳\n820 輪 / 次"]
-    GA3 --> PW3["ExhibitionMonitor\nPlaywright sync\n580 輪 / 次\n共用瀏覽器 + session"]
-    GA4 --> PW4["ProductMonitor\nPlaywright sync\n580 輪 / 次\n共用瀏覽器 + session"]
+    GA1 --> PW1["Playwright async\n50 輪 / 次（約 5 分鐘）\n隨機 UA + viewport"]
+    GA2 --> REQ["requests.Session 登入/加購\n+ Playwright 結帳\n50 輪 / 次（約 5 分鐘）\n連續 3 輪失敗 → 提早結束"]
+    GA3 --> PW3["ExhibitionMonitor\nPlaywright sync\n50 輪 / 次（約 5 分鐘）\n共用瀏覽器 + session"]
+    GA4 --> PW4["ProductMonitor\nPlaywright sync\n50 輪 / 次（約 5 分鐘）\n共用瀏覽器 + session"]
 
     PW1 --> SITE1["1999.co.jp\nBeyblade X 搜尋頁\nCloudflare 保護"]
     REQ --> SITE2["shop.funbox.com.tw\nCyberbiz /products.json API"]
@@ -85,11 +85,11 @@ beyblade-funbox-monitor/
 | 偵測商品 | Beyblade X 系列 | 戰鬥陀螺集合頁 | Beyblade X 書展 API | `ESLITE_EXTRA_PRODUCTS` GUID 清單 |
 | 反爬蟲機制 | Cloudflare（隨機 UA/viewport/locale） | Cyberbiz `/products.json`（無反爬） | Cloudflare（Playwright 繞過） | Cloudflare（Playwright 繞過） |
 | 技術架構 | Playwright async | requests 登入/加購 + Playwright 結帳 | `ExhibitionMonitor`（OOP，Playwright sync） | `ProductMonitor`（OOP，Playwright sync） |
-| 每次執行輪數 | 190 輪（間隔 5~8 秒） | 820 輪（間隔 3~5 秒） | 580 輪（間隔 3~5 秒） | 580 輪（間隔 3~5 秒） |
-| 執行時長 / timeout | ~20 分鐘 / 62 min | ~57 分鐘 / 65 min | ~58 分鐘 / 65 min | ~58 分鐘 / 65 min |
+| 每次執行輪數 | 50 輪（間隔 5~8 秒） | 50 輪（間隔 3~5 秒） | 50 輪（間隔 3~5 秒） | 50 輪（間隔 3~5 秒） |
+| 執行時長 / timeout | ~5 分鐘 / 15 min | ~5 分鐘 / 15 min | ~5 分鐘 / 15 min | ~5 分鐘 / 15 min |
 | 通知冷卻 | 1 小時冷卻 | 1 小時冷卻 | **無冷卻（每輪有庫存即通知）** | **無冷卻（每輪有庫存即通知）** |
 | 自動下單 | 無（1999 結帳需 reCAPTCHA） | **有**（3 帳號平行，7-11 貨到付款） | **有**（加入購物車 + 自動結帳） | **有**（加入購物車 + 自動結帳） |
-| 觸發頻率 | 每小時一次 | 每小時一次 | 每小時一次 | 每小時一次（獨立 cron-job） |
+| 觸發頻率 | **每 5 分鐘一次** | **每 5 分鐘一次** | **每 5 分鐘一次** | **每 5 分鐘一次**（獨立 cron-job） |
 
 ---
 
@@ -138,7 +138,7 @@ beyblade-funbox-monitor/
 
 ### 偵測邏輯
 
-使用 `requests` 直接呼叫 Cyberbiz `/products.json` API，每輪不到 1 秒即可完成：
+使用全域 `requests.Session` 呼叫 Cyberbiz `/products.json` API，重用 TCP/TLS connection，每輪不到 1 秒即可完成：
 
 | 欄位 | 說明 |
 |---|---|
@@ -177,9 +177,10 @@ beyblade-funbox-monitor/
 ```
 偵測到需通知的有庫存商品
   │
-  ├─ APP 限定商品（標題含 "APP"）→ 跳過（僅通知）
+  ├─ SKIP_KEYWORDS 商品（標題含 BX-33/BX-26/暴風天馬/銀牙烈虎/烈焰飛鳳）→ 靜默略過（不通知、不下單）
+  ├─ APP 限定商品（標題含 "APP"）→ 跳過自動下單（仍發通知）
   │
-  └─ 非 APP 商品 → 多帳號平行執行（ThreadPoolExecutor）
+  └─ 非 APP / 非 SKIP 商品 → 多帳號平行執行（ThreadPoolExecutor）
         │
         ├─ [帳號 1] requests 登入 → 全部商品加入購物車 → Playwright 結帳
         ├─ [帳號 2] 同步並行執行
@@ -216,14 +217,24 @@ beyblade-funbox-monitor/
 
 ### 結帳狀態判斷
 
+程式在結帳輪詢期間同時偵測 URL 跳轉與頁面文字，能識別以下六種結果：
+
 | 狀態 | 說明 |
 |---|---|
 | `success` | ✅ 已自動結帳完成 |
 | `payment_failed` | ❌ 訂單已建立但付款失敗（`?show_failed=yes`），請手動完成付款 |
 | `3ds_pending` | ⚠ 訂單已建立，需完成銀行 3DS 驗證 |
 | `checkout_limited` | 🚫 CYBERBIZ 在結帳層級攔截限購，請手動調整數量 |
+| `stock_out` | ⚡ 結帳時商品已售完（加入購物車後被搶走，頁面文字偵測） |
 | `cart` | 🛒 商品已在購物車，請手動完成結帳 |
 | `failed` | ❌ 自動購買失敗，請手動下單 |
+
+### API 連線穩定性
+
+- **全域 `requests.Session`**：750 輪共用同一 TCP/TLS connection，避免每輪重建 handshake
+- **指數退避重試**（最多 4 次）：connect timeout 8 秒；1st retry ~1s、2nd ~2s、3rd ~4s + jitter
+- **429 / 5xx 暫時錯誤**：讀取 `Retry-After` header 等待後重試
+- **連續失敗快速放棄**：若連續 3 輪 `fetch_products()` 全部失敗，程式提早 `break` 結束本次 run，交由下次排程取得新 runner（避免整個 run 困在網路有問題的 VM 上）
 
 ### Email 通知格式
 
@@ -253,8 +264,8 @@ EsliteMonitorBase (ABC)
 
 | Workflow | MONITOR_MODE | CHECK_ROUNDS | ORDER_STATE_FILE |
 |---|---|---|---|
-| `eslite_monitor.yml` | `exhibition` | 580 | `eslite_order_state.json` |
-| `eslite_product_monitor.yml` | `product` | 580 | `eslite_product_order_state.json` |
+| `eslite_monitor.yml` | `exhibition` | 50 | `eslite_order_state.json` |
+| `eslite_product_monitor.yml` | `product` | 50 | `eslite_product_order_state.json` |
 
 兩個 workflow 共用同一個 `eslite_storage_state.json`（session），以 `eslite-session-` cache key 共享。
 
@@ -466,7 +477,7 @@ AUTO_CHECKOUT=true
 | 變數 | 預設值 | 說明 |
 |---|---|---|
 | `SEARCH_URL` | 戰鬥陀螺集合頁 URL | 監控目標（可改為任意 Cyberbiz 集合 URL） |
-| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 820） |
+| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 50） |
 | `CART_QTY` | `3` | 每件商品目標加入數量 |
 | `MAX_BUY_PRODUCTS` | `0`（無限制） | 限制本次最多購買幾件（測試用） |
 | `TEST_MODE` | `0` | 設為 `1` 時 email 主旨加【測試】標注 |
@@ -572,7 +583,7 @@ python eslite_monitor.py
 
 ## 觸發方式
 
-由 **cron-job.org** 每小時呼叫 GitHub API，四個監控各建一個獨立任務：
+由 **cron-job.org** 每 5 分鐘呼叫 GitHub API，四個監控各建一個獨立任務：
 
 ```
 POST https://api.github.com/repos/k0341055/beyblade-funbox-monitor/actions/workflows/1999_monitor.yml/dispatches
@@ -596,3 +607,13 @@ Request Body：
 成功回應：**204 No Content**
 
 > PAT 需要 **Actions: Read and write** 權限（Fine-grained token，僅選此 repo 即可）。
+
+### 為什麼是每 5 分鐘而非每小時？
+
+GitHub-hosted runner 每次啟動都是全新 VM，網路出口路徑不保證相同。將 Job 縮短至 5 分鐘的好處：
+
+| | 每小時 1 次 × 60 分鐘 Job | 每 5 分鐘 1 次 × 5 分鐘 Job |
+|---|---|---|
+| runner 網路異常影響範圍 | 最多損失整整 1 小時 | 最多損失 5 分鐘 |
+| 連線卡住時解法 | 等 Job 自己逾時 | 連續 3 輪失敗 → 提早結束，5 分鐘後新 runner |
+| 故障自動恢復 | 下一小時 | 下一個 5 分鐘 |
