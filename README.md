@@ -487,8 +487,8 @@ AUTO_CHECKOUT=true
 | 變數 | 預設值 | 說明 |
 |---|---|---|
 | `MONITOR_MODE` | `exhibition` | `exhibition`（書展 API）或 `product`（個別商品 GUID） |
-| `ESLITE_API_URL` | CU202503-00091 展覽 API | ExhibitionMonitor 監控目標（可替換為其他誠品活動頁 API） |
-| `ESLITE_EXTRA_PRODUCTS` | `10022136782683190211005` | ProductMonitor 追蹤的商品 GUID，逗號分隔 |
+| `ESLITE_API_URL` | 展覽 API | ExhibitionMonitor 監控目標（可替換為其他誠品活動頁 API） |
+| `ESLITE_EXTRA_PRODUCTS` | `{guid}` | ProductMonitor 追蹤的商品 GUID，逗號分隔 |
 | `CHECK_ROUNDS` | `1` | 執行輪數（書展與個別商品皆為 580） |
 | `CHECKOUT_MAX` | `3` | 每次最多加入購物車的商品件數 |
 | `AUTO_CHECKOUT` | `true` | 設為 `false` 可停用自動下單（僅通知） |
