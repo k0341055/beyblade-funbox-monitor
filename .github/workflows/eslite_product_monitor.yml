@@ -83,7 +83,7 @@ jobs:
           AUTO_CHECKOUT:        'true'
           HEADLESS:             'true'
           MONITOR_MODE:         'product'
-          CHECK_ROUNDS:         ${{ inputs.check_rounds || '50' }}
+          CHECK_ROUNDS:         ${{ inputs.check_rounds || '35' }}
           CHECKOUT_MAX:         '3'
           ORDER_STATE_FILE:     'eslite_product_order_state.json'
           STORAGE_STATE_FILE:   'eslite_storage_state.json'
