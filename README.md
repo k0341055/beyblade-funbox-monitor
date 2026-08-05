@@ -22,10 +22,10 @@ flowchart TD
     CRON -->|workflow_dispatch| GA3["GitHub Actions\neslite_monitor\nubuntu VM"]
     CRON -->|workflow_dispatch| GA4["GitHub Actions\neslite_product_monitor\nubuntu VM"]
 
-    GA1 --> PW1["Playwright async\n50 輪 / 次（約 5 分鐘）\n隨機 UA + viewport"]
-    GA2 --> REQ["requests.Session 登入/加購\n+ Playwright 結帳\n50 輪 / 次（約 5 分鐘）\n連續 3 輪失敗 → 提早結束"]
+    GA1 --> PW1["Playwright async\n15 輪 / 次（約 2 分鐘）\n隨機 UA + viewport"]
+    GA2 --> REQ["requests.Session 登入/加購\n+ Playwright 結帳\n50 輪 / 次（約 4 分鐘）\n連續 3 輪失敗 → 提早結束"]
     GA3 --> PW3["ExhibitionMonitor\nPlaywright sync\n50 輪 / 次（約 5 分鐘）\n共用瀏覽器 + session"]
-    GA4 --> PW4["ProductMonitor\nPlaywright sync\n50 輪 / 次（約 5 分鐘）\n共用瀏覽器 + session"]
+    GA4 --> PW4["ProductMonitor\nPlaywright sync\n35 輪 / 次（約 3.5 分鐘）\n共用瀏覽器 + session"]
 
     PW1 --> SITE1["1999.co.jp\nBeyblade X 搜尋頁\nCloudflare 保護"]
     REQ --> SITE2["shop.funbox.com.tw\nCyberbiz /products.json API"]
@@ -85,8 +85,8 @@ beyblade-funbox-monitor/
 | 偵測商品 | Beyblade X 系列 | 戰鬥陀螺集合頁 | Beyblade X 書展 API | `ESLITE_EXTRA_PRODUCTS` GUID 清單 |
 | 反爬蟲機制 | Cloudflare（隨機 UA/viewport/locale） | Cyberbiz `/products.json`（無反爬） | Cloudflare（Playwright 繞過） | Cloudflare（Playwright 繞過） |
 | 技術架構 | Playwright async | requests 登入/加購 + Playwright 結帳 | `ExhibitionMonitor`（OOP，Playwright sync） | `ProductMonitor`（OOP，Playwright sync） |
-| 每次執行輪數 | 50 輪（間隔 5~8 秒） | 50 輪（間隔 3~5 秒） | 50 輪（間隔 3~5 秒） | 50 輪（間隔 3~5 秒） |
-| 執行時長 / timeout | ~5 分鐘 / 15 min | ~5 分鐘 / 15 min | ~5 分鐘 / 15 min | ~5 分鐘 / 15 min |
+| 每次執行輪數 | **15 輪**（間隔 5~8 秒） | **50 輪**（間隔 3~5 秒） | **50 輪**（間隔 3~5 秒） | **35 輪**（間隔 3~5 秒） |
+| 執行時長 / timeout | ~2 分鐘 / 15 min | ~4 分鐘 / 15 min | ~5 分鐘 / 15 min | ~3.5 分鐘 / 15 min |
 | 通知冷卻 | 1 小時冷卻 | 1 小時冷卻 | **無冷卻（每輪有庫存即通知）** | **無冷卻（每輪有庫存即通知）** |
 | 自動下單 | 無（1999 結帳需 reCAPTCHA） | **有**（3 帳號平行，7-11 貨到付款） | **有**（加入購物車 + 自動結帳） | **有**（加入購物車 + 自動結帳） |
 | 觸發頻率 | **每 5 分鐘一次** | **每 5 分鐘一次** | **每 5 分鐘一次** | **每 5 分鐘一次**（獨立 cron-job） |
@@ -254,10 +254,10 @@ EsliteMonitorBase (ABC)
   ├─ 共用：登入、購物車、結帳、Email 通知、session 持久化、下單去重
   │
   ├─ ExhibitionMonitor（MONITOR_MODE=exhibition，預設）
-  │     └─ 呼叫 book_exhibits API → 遞迴解析書展 JSON → ~6 秒/輪 → 580 輪/次
+  │     └─ 呼叫 book_exhibits API → 遞迴解析書展 JSON → ~6 秒/輪 → 50 輪/次
   │
   └─ ProductMonitor（MONITOR_MODE=product）
-        └─ 逐一呼叫 products/{guid} API → ~6 秒/輪 → 580 輪/次
+        └─ 逐一呼叫 products/{guid} API → ~6 秒/輪 → 35 輪/次
 ```
 
 兩個模式分別由獨立 GitHub Actions workflow 觸發，各使用獨立的 `ORDER_STATE_FILE`（避免下單狀態互相干擾）：
@@ -265,7 +265,7 @@ EsliteMonitorBase (ABC)
 | Workflow | MONITOR_MODE | CHECK_ROUNDS | ORDER_STATE_FILE |
 |---|---|---|---|
 | `eslite_monitor.yml` | `exhibition` | 50 | `eslite_order_state.json` |
-| `eslite_product_monitor.yml` | `product` | 50 | `eslite_product_order_state.json` |
+| `eslite_product_monitor.yml` | `product` | 35 | `eslite_product_order_state.json` |
 
 兩個 workflow 共用同一個 `eslite_storage_state.json`（session），以 `eslite-session-` cache key 共享。
 
