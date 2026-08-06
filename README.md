@@ -413,6 +413,19 @@ gh secret set ESLITE_STORAGE_STATE_B64 \
 
 ## 環境設定
 
+### GitHub Variables（必填）
+
+API 目標 URL 存放於 Variables（内容可見，但不暴露在程式碼中）：
+
+| Variable | 適用監控 | 說明 |
+|---|---|---|
+| `FUNBOX_SEARCH_URL` | Funbox | Funbox 戰鬥陀螺集合頁 URL |
+| `SEARCH_URL_1999` | 1999 | 1999.co.jp Beyblade X 搜尋頁 URL |
+| `ESLITE_API_URL` | 誠品書展 | 誠品書展 API URL（`athena.eslite.com/api/v1/book_exhibits/...`） |
+| `ESLITE_EVENT_URL` | 誠品 | 誠品書展活動頁 URL（選填，附於通知信末尾） |
+
+> 設定路徑：GitHub Repo → Settings → Secrets and variables → Actions → **Variables** 標籤 → New repository variable
+
 ### GitHub Secrets（必填）
 
 | Secret | 適用監控 | 說明 |
@@ -434,7 +447,7 @@ gh secret set ESLITE_STORAGE_STATE_B64 \
 | `ESLITE_EXTRA_PRODUCTS` | 誠品個別商品 | 要追蹤的商品 GUID，逗號分隔（ProductMonitor 使用） |
 | `ESLITE_STORAGE_STATE_B64` | 誠品 | Session 備援（base64 編碼的 storage_state.json） |
 
-> 設定路徑：GitHub Repo → Settings → Secrets and variables → Actions → New repository secret
+> 設定路徑：GitHub Repo → Settings → Secrets and variables → Actions → **Secrets** 標籤 → New repository secret
 
 ### 本機開發
 
@@ -446,7 +459,7 @@ GMAIL_PASSWORD=xxxx xxxx xxxx xxxx
 GMAIL_RECIPIENTS=your@gmail.com
 CHECK_ROUNDS=1
 HEADLESS=false
-# SEARCH_URL={product_url}
+SEARCH_URL={設定於 GitHub Variable SEARCH_URL_1999}
 ```
 
 **`funbox_monitor/.env`**：
@@ -462,6 +475,7 @@ FUNBOX_EMAIL_2=second@gmail.com
 FUNBOX_PASSWORD_2=second_password
 FUNBOX_EMAIL_3=third@gmail.com
 FUNBOX_PASSWORD_3=third_password
+SEARCH_URL={設定於 GitHub Variable FUNBOX_SEARCH_URL}
 ```
 
 **`eslite_monitor/.env`**：
@@ -478,36 +492,39 @@ CHECKOUT_STORE_CODE=B0XX
 CHECK_ROUNDS=1
 HEADLESS=false
 AUTO_CHECKOUT=true
+ESLITE_API_URL={設定於 GitHub Variable ESLITE_API_URL}
+ESLITE_EVENT_URL={設定於 GitHub Variable ESLITE_EVENT_URL}
 ```
 
 ### 選填環境變數
 
 #### 1999
 
-| 變數 | 預設值 | 說明 |
+| 變數 | 來源 | 說明 |
 |---|---|---|
-| `SEARCH_URL` | Beyblade X 搜尋頁 URL | 監控目標（可替換為任意 1999.co.jp 搜尋 URL） |
-| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 190） |
+| `SEARCH_URL` | GitHub Variable `SEARCH_URL_1999` | 監控目標（可替換為任意 1999.co.jp 搜尋 URL） |
+| `CHECK_ROUNDS` | `1`（本機預設） | 執行輪數（GitHub Actions 設為 15） |
 | `HEADLESS` | `true` | 設為 `false` 可在本機看到瀏覽器視窗 |
 
 #### Funbox
 
-| 變數 | 預設值 | 說明 |
+| 變數 | 來源 | 說明 |
 |---|---|---|
-| `SEARCH_URL` | 戰鬥陀螺集合頁 URL | 監控目標（可改為任意 Cyberbiz 集合 URL） |
-| `CHECK_ROUNDS` | `1` | 執行輪數（GitHub Actions 設為 50） |
+| `SEARCH_URL` | GitHub Variable `FUNBOX_SEARCH_URL` | 監控目標（可改為任意 Cyberbiz 集合 URL） |
+| `CHECK_ROUNDS` | `1`（本機預設） | 執行輪數（GitHub Actions 設為 60） |
 | `CART_QTY` | `3` | 每件商品目標加入數量 |
 | `MAX_BUY_PRODUCTS` | `0`（無限制） | 限制本次最多購買幾件（測試用） |
 | `TEST_MODE` | `0` | 設為 `1` 時 email 主旨加【測試】標注 |
 
 #### 誠品
 
-| 變數 | 預設值 | 說明 |
+| 變數 | 來源 | 說明 |
 |---|---|---|
 | `MONITOR_MODE` | `exhibition` | `exhibition`（書展 API）或 `product`（個別商品 GUID） |
-| `ESLITE_API_URL` | 展覽 API | ExhibitionMonitor 監控目標（可替換為其他誠品活動頁 API） |
-| `ESLITE_EXTRA_PRODUCTS` | `{guid}` | ProductMonitor 追蹤的商品 GUID，逗號分隔 |
-| `CHECK_ROUNDS` | `1` | 執行輪數（書展與個別商品皆為 580） |
+| `ESLITE_API_URL` | GitHub Variable `ESLITE_API_URL` | ExhibitionMonitor 監控目標（必填，可替換為其他誠品活動頁 API） |
+| `ESLITE_EVENT_URL` | GitHub Variable `ESLITE_EVENT_URL` | 誠品書展活動頁 URL（選填，附於通知信末尾） |
+| `ESLITE_EXTRA_PRODUCTS` | Secret `ESLITE_EXTRA_PRODUCTS` | ProductMonitor 追蹤的商品 GUID，逗號分隔 |
+| `CHECK_ROUNDS` | `1`（本機預設） | 執行輪數（書展：50，個別商品：35） |
 | `CHECKOUT_MAX` | `3` | 每次最多加入購物車的商品件數 |
 | `AUTO_CHECKOUT` | `true` | 設為 `false` 可停用自動下單（僅通知） |
 | `HEADLESS` | `true` | 設為 `false` 可在本機手動完成 reCAPTCHA |
