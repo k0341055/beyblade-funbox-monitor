@@ -24,8 +24,8 @@ flowchart TD
 
     GA1 --> PW1["Playwright async\n15 輪 / 次（約 2 分鐘）\n隨機 UA + viewport"]
     GA2 --> REQ["requests.Session 登入/加購\n+ Playwright 結帳\n50 輪 / 次（約 4 分鐘）\n連續 3 輪失敗 → 提早結束"]
-    GA3 --> PW3["ExhibitionMonitor\nPlaywright sync\n50 輪 / 次（約 5 分鐘）\n共用瀏覽器 + session"]
-    GA4 --> PW4["ProductMonitor\nPlaywright sync\n35 輪 / 次（約 3.5 分鐘）\n共用瀏覽器 + session"]
+    GA3 --> PW3["ExhibitionMonitor\nPlaywright sync\n50 輪 / 次（約 5 分鐘）\n監控 context 匿名"]
+    GA4 --> PW4["ProductMonitor\nPlaywright sync\n35 輪 / 次（約 3.5 分鐘）\n監控 context 匿名"]
 
     PW1 --> SITE1["1999.co.jp\nBeyblade X 搜尋頁\nCloudflare 保護"]
     REQ --> SITE2["shop.funbox.com.tw\nCyberbiz /products.json API"]
@@ -42,12 +42,13 @@ flowchart TD
     NOCD --> MAIL3["Gmail → 全體收件人\n含一鍵結帳連結"]
 
     COOL2 -->|同輪觸發| BUY["多帳號平行下單\nThreadPoolExecutor\n7-11 貨到付款"]
-    NOCD -->|同輪觸發\nguid 不在記憶體且未下單| ECART["eslite 自動登入\n→ 清空購物車\n→ 加入購物車"]
+    NOCD -->|同輪觸發\nguid 不在記憶體且未下單| ECART["建立獨立結帳 context（含 session）\n→ 登入 → 清空購物車\n→ 加入購物車"]
+    NOCD -->|所有 guid 已在 order_state| SKIP["跳過下單\n不建立 session context\n不登入（避免異地衝突）"]
 
     ECART -->|加入成功| CPEND["記憶體記錄 guid\n同一 run 後續輪次跳過\n不再清購物車"]
     CPEND --> CNOTIF["購物車通知\n→ ORDER_RECIPIENTS\n含一鍵結帳連結"]
     CPEND -->|嘗試自動結帳| CHECKOUT{"結帳結果"}
-    CHECKOUT -->|成功| ONOTIF["訂單確認通知\n→ ORDER_RECIPIENTS\n寫入 order_state（永久去重）"]
+    CHECKOUT -->|成功| ONOTIF["訂單確認通知\n→ ORDER_RECIPIENTS\n寫入 order_state（永久去重）\n儲存 session → 關閉結帳 context"]
     CHECKOUT -->|失敗| MANUAL["商品留購物車\n請手動結帳\n下次 run 可重新嘗試"]
 ```
 
@@ -85,8 +86,8 @@ beyblade-funbox-monitor/
 | 偵測商品 | Beyblade X 系列 | 戰鬥陀螺集合頁 | Beyblade X 書展 API | `ESLITE_EXTRA_PRODUCTS` GUID 清單 |
 | 反爬蟲機制 | Cloudflare（隨機 UA/viewport/locale） | Cyberbiz `/products.json`（無反爬） | Cloudflare（Playwright 繞過） | Cloudflare（Playwright 繞過） |
 | 技術架構 | Playwright async | requests 登入/加購 + Playwright 結帳 | `ExhibitionMonitor`（OOP，Playwright sync） | `ProductMonitor`（OOP，Playwright sync） |
-| 每次執行輪數 | **15 輪**（間隔 5~8 秒） | **50 輪**（間隔 3~5 秒） | **50 輪**（間隔 3~5 秒） | **35 輪**（間隔 3~5 秒） |
-| 執行時長 / timeout | ~2 分鐘 / 15 min | ~4 分鐘 / 15 min | ~5 分鐘 / 15 min | ~3.5 分鐘 / 15 min |
+| 每次執行輪數 | **15 輪**（間隔 5~8 秒） | **60 輪**（間隔 3~5 秒） | **50 輪**（間隔 3~5 秒） | **35 輪**（間隔 3~5 秒） |
+| 執行時長 / timeout | ~2 分鐘 / 25 min | ~5 分鐘 / 25 min | ~5 分鐘 / 25 min | ~3.5 分鐘 / 25 min |
 | 通知冷卻 | 1 小時冷卻 | 1 小時冷卻 | **無冷卻（每輪有庫存即通知）** | **無冷卻（每輪有庫存即通知）** |
 | 自動下單 | 無（1999 結帳需 reCAPTCHA） | **有**（3 帳號平行，7-11 貨到付款） | **有**（加入購物車 + 自動結帳） | **有**（加入購物車 + 自動結帳） |
 | 觸發頻率 | **每 5 分鐘一次** | **每 5 分鐘一次** | **每 5 分鐘一次** | **每 5 分鐘一次**（獨立 cron-job） |
@@ -311,7 +312,15 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
 偵測到有庫存商品
   │
   ├─ 過濾：移除 eslite_order_state.json 中已下單的商品
+  │         誠品每帳號每商品限購一次（不論哪次上架）
   ├─ 取前 CHECKOUT_MAX 件（預設 3，防止大型展覽大量下單）
+  │
+  ├─ 若所有商品均已下單 → 直接返回，不建立 session context，不登入
+  │     （此後每輪仍繼續通知，但完全沒有登入行為，不影響使用者的 session）
+  │
+  ├─ 建立獨立結帳 context（載入 storage_state session cookies）
+  │     與監控 context 完全隔離，避免從 GitHub runner（美國 IP）持續送認證請求
+  │     導致帳號被誠品判定為異地登入並強制所有裝置登出
   │
   ├─ ensure_logged_in()
   │     ├─ 帶 storage_state cookies → 導覽 /member → 確認登出按鈕存在
@@ -330,15 +339,17 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
   │
   ├─ 【立即發送購物車通知】→ ORDER_RECIPIENTS（含一鍵結帳連結）
   │
-  └─ checkout()
-        ├─ goto /cart → 點結帳 → 選「誠品門市取貨」
-        ├─ scrollBy(0, 400)（讓城市/門市下拉選單進入視窗）
-        ├─ 選城市（CHECKOUT_CITY）→ 選門市（CHECKOUT_STORE_CODE）
-        ├─ 點「ATM轉帳」→ 點「確認結帳」
-        ├─ wait_for_url "**/cart/step3**"
-        │
-        ├─ 成功 → 發訂單確認通知 → 寫入 order_state（永久去重）
-        └─ 失敗 → log 警告（商品留購物車；下次 run 若庫存仍在可重新嘗試）
+  ├─ checkout()
+  │     ├─ goto /cart → 點結帳 → 選「誠品門市取貨」
+  │     ├─ scrollBy(0, 400)（讓城市/門市下拉選單進入視窗）
+  │     ├─ 選城市（CHECKOUT_CITY）→ 選門市（CHECKOUT_STORE_CODE）
+  │     ├─ 點「ATM轉帳」→ 點「確認結帳」
+  │     ├─ wait_for_url "**/cart/step3**"
+  │     │
+  │     ├─ 成功 → 發訂單確認通知 → 寫入 order_state（永久去重）
+  │     └─ 失敗 → log 警告（商品留購物車；下次 run 若庫存仍在可重新嘗試）
+  │
+  └─ 儲存最新 session cookies → 關閉結帳 context（session 只存在於本段期間）
 ```
 
 > 誠品購物車**跨裝置、跨登入持久存在**，就算自動結帳失敗，商品仍留在購物車中，使用者可直接點購物車通知信中的連結手動完成結帳。
@@ -347,7 +358,9 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
 
 `eslite_order_state.json` 只記錄**自動結帳成功**的商品 guid（永久去重）。
 
-同一個 **run** 內，已加入購物車的 guid 記錄在記憶體（`_cart_added_guids`）：同一 run 後續的 **round** 遇到該 guid 會直接跳過，不清空購物車。Run 結束後 VM 銷毀，記憶體重置——下一個 run（下一小時）若商品仍有庫存且尚未成功下單，程式會重新嘗試加入購物車。
+**誠品每帳號對同一商品限購一次，不論是哪次上架**。一旦商品寫入 `order_state`，後續所有輪次偵測到有庫存只會繼續通知，不會嘗試登入或下單。這也同時消除了 GitHub runner（美國 IP）與使用者（台灣）session 衝突的問題。
+
+同一個 **run** 內，已加入購物車的 guid 記錄在記憶體（`_cart_added_guids`）：同一 run 後續的 **round** 遇到該 guid 會直接跳過，不清空購物車。Run 結束後 VM 銷毀，記憶體重置——下一個 run 若商品仍有庫存且尚未成功下單，程式會重新嘗試加入購物車。
 
 > 若誠品因庫存歸零自動清空購物車，下一個 run 偵測到有新庫存即可重新加入，不受影響。
 >
@@ -370,14 +383,19 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
   │         (key: eslite-session-{run_id}，restore-keys: eslite-session-)
   └─ 備援：若 cache miss → 從 ESLITE_STORAGE_STATE_B64 secret base64 解碼
 
-580 輪（rounds）全部完成後
-  └─ ctx.storage_state() 儲存最新 cookies（包含信任裝置 cookie）
+監控期間（全部輪次）
+  └─ 使用匿名 context（無 session cookies），API 請求不帶任何認證資訊
+
+有庫存且需要下單時（_attempt_checkout 內）
+  ├─ 建立獨立結帳 context，載入 storage_state
+  ├─ 完成登入 / 下單流程
+  └─ 成功或失敗後，儲存最新 session → 立即關閉結帳 context
 
 每次 run 結束時
   └─ Actions cache 自動儲存（供下一個 run 使用）
 ```
 
-Session 存活時間：信任裝置 cookie 約 30~90 天，但由於腳本每小時執行並刷新 cookies，**只要連續正常執行 session 就不會過期**。
+Session 存活時間：信任裝置 cookie 約 30~90 天。由於監控輪次使用匿名 context，**session 只在實際下單時短暫出現**，大幅減少被誠品偵測為異地異常的機會。
 
 **Session 失效處理**（手動）：
 
