@@ -519,10 +519,13 @@ class EsliteMonitorBase(ABC):
 
     # ── 自動下單流程 ──────────────────────────
 
-    def _attempt_checkout(self, page, ctx, in_stock_products: list):
+    def _attempt_checkout(self, page, in_stock_products: list):
         """
         加入購物車 → 立即發購物車通知（含結帳連結）→ 嘗試自動結帳。
         結帳失敗時商品仍留購物車，使用者可手動結帳。
+
+        誠品限購一次（不論哪次上架）：所有商品均已下單時直接返回，不建立 session context。
+        結帳 context 與監控 context 完全隔離，避免帳號被異地登出。
         """
         ordered  = self._load_order_state()
         to_order = [
@@ -530,45 +533,64 @@ class EsliteMonitorBase(ABC):
             if p["guid"] not in ordered and p["guid"] not in self._cart_added_guids
         ][:self.CHECKOUT_MAX]
         if not to_order:
-            log.info("所有有庫存商品均已下單或本輪已加入購物車，跳過")
+            log.info("所有有庫存商品均已下單過（限購一次），跳過自動下單")
             return
 
         log.info(f"準備加入購物車 {len(to_order)} 件（CHECKOUT_MAX={self.CHECKOUT_MAX}）")
-        if not self._ensure_logged_in(page, ctx):
-            log.warning("無法登入誠品，跳過自動下單")
-            return
 
-        self._clear_cart(page)
+        # 建立獨立的結帳 context（載入 session），與匿名監控 context 完全隔離
+        browser = page.context.browser
+        ckout_kwargs = {"user_agent": self._UA}
+        if self.STORAGE_STATE_FILE.exists():
+            ckout_kwargs["storage_state"] = str(self.STORAGE_STATE_FILE)
+        ckout_ctx = browser.new_context(**ckout_kwargs)
+        ckout_ctx.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        ckout_page = ckout_ctx.new_page()
 
-        added = []
-        for p in to_order:
-            if self._add_to_cart(page, p["guid"], self._calc_order_qty(p)):
-                added.append(p)
+        try:
+            if not self._ensure_logged_in(ckout_page, ckout_ctx):
+                log.warning("無法登入誠品，跳過自動下單")
+                return
 
-        if not added:
-            log.warning("所有商品加入購物車均失敗，跳過結帳")
-            return
+            self._clear_cart(ckout_page)
 
-        # 記憶體記錄，防止同一 run 內後續輪次再次清空購物車
-        for p in added:
-            self._cart_added_guids.add(p["guid"])
+            added = []
+            for p in to_order:
+                if self._add_to_cart(ckout_page, p["guid"], self._calc_order_qty(p)):
+                    added.append(p)
 
-        self._notify_cart_added(added)
-        log.info(f"已加入購物車 {len(added)} 件，開始自動結帳...")
+            if not added:
+                log.warning("所有商品加入購物車均失敗，跳過結帳")
+                return
 
-        order_id = self._checkout(page)
-        if order_id:
-            self._notify_order(added, order_id)
-            now_str = datetime.now(self.TW_TZ).isoformat()
             for p in added:
-                ordered[p["guid"]] = {"order_id": order_id, "ordered_at": now_str}
-            self._save_order_state(ordered)
-        else:
-            log.warning("自動結帳失敗，商品已留在購物車，請點擊通知信中連結手動結帳")
+                self._cart_added_guids.add(p["guid"])
+
+            self._notify_cart_added(added)
+            log.info(f"已加入購物車 {len(added)} 件，開始自動結帳...")
+
+            order_id = self._checkout(ckout_page)
+            if order_id:
+                self._notify_order(added, order_id)
+                now_str = datetime.now(self.TW_TZ).isoformat()
+                for p in added:
+                    ordered[p["guid"]] = {"order_id": order_id, "ordered_at": now_str}
+                self._save_order_state(ordered)
+            else:
+                log.warning("自動結帳失敗，商品已留在購物車，請點擊通知信中連結手動結帳")
+        finally:
+            try:
+                ckout_ctx.storage_state(path=str(self.STORAGE_STATE_FILE))
+                log.info(f"Session 狀態已更新：{self.STORAGE_STATE_FILE}")
+            except Exception as e:
+                log.warning(f"更新 session 狀態失敗：{e}")
+            ckout_ctx.close()
 
     # ── 核心偵測（每輪） ──────────────────────
 
-    def check_once(self, page, ctx) -> bool:
+    def check_once(self, page) -> bool:
         try:
             products = self.fetch_in_stock_products(page)
 
@@ -580,7 +602,7 @@ class EsliteMonitorBase(ABC):
             self._notify_products(products)
 
             if self.AUTO_CHECKOUT and self.ESLITE_ACCOUNT:
-                self._attempt_checkout(page, ctx, products)
+                self._attempt_checkout(page, products)
 
             return True
 
@@ -605,14 +627,9 @@ class EsliteMonitorBase(ABC):
                 headless=self.HEADLESS,
                 args=["--disable-blink-features=AutomationControlled"],
             )
-            ctx_kwargs = {"user_agent": self._UA}
-            if self.AUTO_CHECKOUT and self.ESLITE_ACCOUNT and self.STORAGE_STATE_FILE.exists():
-                ctx_kwargs["storage_state"] = str(self.STORAGE_STATE_FILE)
-                log.info(f"已載入 session 狀態：{self.STORAGE_STATE_FILE}")
-            elif self.AUTO_CHECKOUT and self.ESLITE_ACCOUNT:
-                log.info("尚無 session 狀態，將於首輪登入後儲存")
-
-            ctx  = br.new_context(**ctx_kwargs)
+            # 監控 context 永遠匿名，不載入 session cookies
+            # session 只在 _attempt_checkout 內的獨立 context 短暫使用
+            ctx = br.new_context(user_agent=self._UA)
             ctx.add_init_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             )
@@ -621,18 +638,11 @@ class EsliteMonitorBase(ABC):
             for round_num in range(1, self.CHECK_ROUNDS + 1):
                 if self.CHECK_ROUNDS > 1:
                     log.info(f"── 第 {round_num}/{self.CHECK_ROUNDS} 輪 ──")
-                self.check_once(page, ctx)
+                self.check_once(page)
                 if round_num < self.CHECK_ROUNDS:
                     wait = random.randint(3, 5)
                     log.info(f"等待 {wait} 秒後進行下一輪...")
                     time.sleep(wait)
-
-            if self.AUTO_CHECKOUT and self.ESLITE_ACCOUNT:
-                try:
-                    ctx.storage_state(path=str(self.STORAGE_STATE_FILE))
-                    log.info(f"Session 狀態已更新：{self.STORAGE_STATE_FILE}")
-                except Exception as e:
-                    log.warning(f"更新 session 狀態失敗：{e}")
 
             br.close()
 
