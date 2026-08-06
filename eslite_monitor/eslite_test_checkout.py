@@ -2,9 +2,7 @@
 [TEST ONLY - 測試完畢後請刪除此檔案及對應 GitHub Action]
 
 用途：驗證從 GitHub Actions (US VM) 能否成功登入誠品並下單
-監控目標：https://www.eslite.com/exhibitions/CU202512-00052
-通知對象：kevin850703@gmail.com
-下單帳號：0932009902
+監控目標、帳號、收件人均從 GitHub Variable / Secret 讀取，不硬編碼個資。
 """
 
 import logging
@@ -25,9 +23,16 @@ from eslite_monitor import EsliteMonitorBase
 
 log = logging.getLogger(__name__)
 
-EXHIBITION_URL = "https://www.eslite.com/exhibitions/CU202512-00052"
-TEST_ACCOUNT   = "0932009902"
-TEST_RECIPIENT = "kevin850703@gmail.com"
+EXHIBITION_URL = os.environ.get("TEST_EXHIBITION_URL", "").strip()
+TEST_ACCOUNT   = os.environ.get("TEST_ESLITE_ACCOUNT", "").strip()
+TEST_RECIPIENT = os.environ.get("TEST_RECIPIENT_EMAIL", "").strip()
+
+if not EXHIBITION_URL:
+    raise ValueError("TEST_EXHIBITION_URL 未設定（請設定 GitHub Variable）")
+if not TEST_ACCOUNT:
+    raise ValueError("TEST_ESLITE_ACCOUNT 未設定（請設定 GitHub Secret）")
+if not TEST_RECIPIENT:
+    raise ValueError("TEST_RECIPIENT_EMAIL 未設定（請設定 GitHub Secret）")
 
 
 class TestCheckoutMonitor(EsliteMonitorBase):
