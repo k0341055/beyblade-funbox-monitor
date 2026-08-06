@@ -311,6 +311,9 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
 ```
 偵測到有庫存商品
   │
+  ├─ 本次 run 內登入失敗已達 2 次 → 直接返回（僅繼續通知，不再嘗試登入）
+  │     （run 結束後 VM 銷毀，下次 run 計數歸零）
+  │
   ├─ 過濾：移除 eslite_order_state.json 中已下單的商品
   │         誠品每帳號每商品限購一次（不論哪次上架）
   ├─ 取前 CHECKOUT_MAX 件（預設 3，防止大型展覽大量下單）
@@ -325,6 +328,11 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
   ├─ ensure_logged_in()
   │     ├─ 帶 storage_state cookies → 導覽 /member → 確認登出按鈕存在
   │     └─ 若未登入 → _do_login()（填帳密 → 等待 reCAPTCHA → 存 session）
+  │           ├─ 登入成功 → 繼續下單
+  │           └─ 登入失敗（簡訊驗證 / 帳密錯誤 / 例外）
+  │                 ├─ 失敗計數 +1
+  │                 ├─ 發送登入失敗警告 Email（說明手動重新登入步驟）
+  │                 └─ 若失敗計數已達 2 → 後續輪次將跳過下單，僅繼續通知
   │
   ├─ 清空購物車（逐一點擊刪除按鈕）
   │
@@ -373,7 +381,7 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
 | **庫存通知** | 全體 GMAIL_RECIPIENTS | 每輪偵測到有庫存 | 商品名/庫存/上限/連結 + 一鍵結帳連結 |
 | **購物車通知** | ORDER_RECIPIENTS | 加入購物車成功後立即發 | 商品名/加入數量/上限 + 一鍵結帳連結 |
 | **訂單確認通知** | ORDER_RECIPIENTS | 自動結帳成功 | 訂單編號/付款方式/取貨門市/商品清單 |
-| **登入失敗警告** | ORDER_RECIPIENTS | Session 失效且無法自動登入 | 手動重新登入步驟說明 |
+| **登入失敗警告** | ORDER_RECIPIENTS | Session 失效且無法自動登入（每次 run 最多觸發 2 次，之後停止嘗試） | 手動重新登入步驟說明 |
 
 ### Session 持久化（跨 VM 關鍵）
 
@@ -400,14 +408,15 @@ Session 存活時間：信任裝置 cookie 約 30~90 天。由於監控輪次使
 **Session 失效處理**（手動）：
 
 ```bash
-# 1. 本機執行（會開啟瀏覽器，手動完成 reCAPTCHA / 簡訊驗證）
+# 1. 本機執行（開啟 Chromium，手動輸入帳號密碼登入，含簡訊驗證碼，完成後自動儲存）
 cd eslite_monitor && python generate_session.py
 
 # 2. 更新 GitHub Secret
-gh secret set ESLITE_STORAGE_STATE_B64 \
-  --body "$(base64 -i eslite_storage_state.json | tr -d '\n')" \
-  --repo k0341055/beyblade-funbox-monitor
+base64 -i eslite_monitor/eslite_storage_state.json | tr -d '\n' | \
+  gh secret set ESLITE_STORAGE_STATE_B64
 ```
+
+> `generate_session.py` 不需要 `.env` 帳密，直接開啟瀏覽器讓使用者手動登入，等待最多 5 分鐘（含簡訊驗證），登入成功後自動儲存 session。
 
 ---
 
