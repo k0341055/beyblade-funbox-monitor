@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       check_rounds:
-        description: '執行輪數（留空使用預設值 50，約 5 分鐘）'
+        description: '執行輪數（留空使用預設值 60，約 5 分鐘）'
         required: false
         default: ''
 
@@ -68,7 +68,7 @@ jobs:
           FUNBOX_PASSWORD_2: ${{ secrets.FUNBOX_PASSWORD_2 }}
           FUNBOX_EMAIL_3:    ${{ secrets.FUNBOX_EMAIL_3 }}
           FUNBOX_PASSWORD_3: ${{ secrets.FUNBOX_PASSWORD_3 }}
-          CHECK_ROUNDS:      ${{ inputs.check_rounds || '50' }}
+          CHECK_ROUNDS:      ${{ inputs.check_rounds || '60' }}
           STATE_FILE:        'seen_products.json'
         working-directory: funbox_monitor
         run: python funbox_monitor.py
