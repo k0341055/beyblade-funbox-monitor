@@ -87,6 +87,10 @@ class EsliteMonitorBase(ABC):
         # 記憶體內追蹤（僅本次執行有效），防止同一 run 內重複清空購物車
         self._cart_added_guids: set = set()
 
+        # 登入失敗計數：累計達上限後放棄自動下單，僅繼續通知
+        self._login_fail_count: int = 0
+        self.LOGIN_FAIL_MAX: int = 2
+
     # ── 抽象介面 ──────────────────────────────
 
     @abstractmethod
@@ -250,6 +254,7 @@ class EsliteMonitorBase(ABC):
                         log.info(f"簡訊驗證完成，session 已儲存至 {self.STORAGE_STATE_FILE}")
                         return True
                 log.warning("需要簡訊驗證碼，無法在 GitHub Actions 中自動完成")
+                self._login_fail_count += 1
                 self._notify_login_required()
                 return False
 
@@ -258,6 +263,7 @@ class EsliteMonitorBase(ABC):
                     page.screenshot(path="debug_login.png")
                 except Exception:
                     pass
+                self._login_fail_count += 1
                 log.error(f"登入失敗（仍停在登入頁）：{page.url}")
                 return False
 
@@ -265,6 +271,7 @@ class EsliteMonitorBase(ABC):
             log.info(f"登入成功，session 已儲存至 {self.STORAGE_STATE_FILE}")
             return True
         except Exception as e:
+            self._login_fail_count += 1
             log.error(f"登入時發生例外：{e}")
             return False
 
@@ -527,6 +534,13 @@ class EsliteMonitorBase(ABC):
         誠品限購一次（不論哪次上架）：所有商品均已下單時直接返回，不建立 session context。
         結帳 context 與監控 context 完全隔離，避免帳號被異地登出。
         """
+        if self._login_fail_count >= self.LOGIN_FAIL_MAX:
+            log.warning(
+                f"本次執行已累計 {self._login_fail_count} 次登入失敗，"
+                f"放棄自動下單（僅繼續通知）"
+            )
+            return
+
         ordered  = self._load_order_state()
         to_order = [
             p for p in in_stock_products

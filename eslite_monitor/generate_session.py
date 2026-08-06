@@ -1,13 +1,7 @@
-"""一次性工具：登入誠品並儲存 session 狀態到 eslite_storage_state.json"""
+"""一次性工具：開啟誠品登入頁，手動登入後儲存 session 狀態"""
 import os
-from pathlib import Path
-from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
-load_dotenv(dotenv_path=".env")
-
-ACCOUNT  = os.environ["ESLITE_ACCOUNT"]
-PASSWORD = os.environ["ESLITE_PASSWORD"]
 OUT_FILE = os.environ.get("STORAGE_STATE_FILE", "eslite_storage_state.json")
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -22,23 +16,35 @@ with sync_playwright() as pw:
     page = ctx.new_page()
 
     page.goto("https://www.eslite.com/login", wait_until="domcontentloaded", timeout=20000)
-    page.wait_for_timeout(2000)
-    page.get_by_role("textbox", name="台灣手機/會員卡號/自訂帳號").click()
-    page.get_by_role("textbox", name="台灣手機/會員卡號/自訂帳號").fill(ACCOUNT)
-    page.get_by_role("textbox", name="請輸入密碼").click()
-    page.get_by_role("textbox", name="請輸入密碼").fill(PASSWORD)
-    page.get_by_role("button", name="登入").click()
-    page.wait_for_timeout(1500)
+    print(">>> 瀏覽器已開啟，請手動輸入帳號密碼登入（含簡訊驗證碼，等待最多 5 分鐘）")
+    print(f">>> 目前 URL：{page.url}")
 
-    print(">>> 請在瀏覽器中完成圖形驗證碼（若出現），完成後腳本自動繼續（等待最多 120 秒）")
     try:
+        # 等待 pathname 離開 /login（最多 5 分鐘）
         page.wait_for_function(
             "() => !window.location.pathname.startsWith('/login')",
-            timeout=120_000,
+            timeout=300_000,
         )
+        print(f">>> 已離開登入頁，目前 URL：{page.url}")
+
+        # 若跳到 SMS / OTP 驗證頁，繼續等完成
+        sms_keywords = ["verify", "otp", "sms", "驗證"]
+        if any(kw in page.url.lower() for kw in sms_keywords):
+            print(">>> 偵測到驗證頁，請完成驗證（再等最多 3 分鐘）")
+            page.wait_for_function(
+                "() => !['verify','otp','sms','驗證'].some(k => window.location.href.includes(k))",
+                timeout=180_000,
+            )
+            print(f">>> 驗證完成，目前 URL：{page.url}")
+
         ctx.storage_state(path=OUT_FILE)
-        print(f">>> Session 已儲存至 {OUT_FILE}")
+        print(f">>> ✓ Session 已儲存至 {OUT_FILE}")
+        print()
+        print(">>> 接下來執行以下指令更新 GitHub Secret：")
+        print(f"    base64 -i eslite_monitor/{OUT_FILE} | tr -d '\\n' | gh secret set ESLITE_STORAGE_STATE_B64")
+
     except Exception as e:
-        print(f">>> 登入失敗：{e}")
+        print(f">>> 等待超時或發生錯誤：{e}")
+        print(f">>> 目前 URL：{page.url}")
 
     br.close()

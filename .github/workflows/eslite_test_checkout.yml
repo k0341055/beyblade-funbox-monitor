@@ -1,0 +1,71 @@
+name: "[TEST] 誠品結帳功能測試（測試完畢請刪除）"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-eslite-${{ runner.os }}
+
+      - name: Install Python dependencies
+        run: pip install -r eslite_monitor/requirements.txt
+
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('eslite_monitor/requirements.txt') }}
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install chromium --with-deps
+
+      - name: Restore session state from cache
+        uses: actions/cache@v4
+        id: session-cache
+        with:
+          path: eslite_monitor/eslite_storage_state.json
+          key: eslite-session-${{ github.run_id }}
+          restore-keys: |
+            eslite-session-
+
+      - name: Restore session state from secret (fallback)
+        if: steps.session-cache.outputs.cache-hit != 'true'
+        env:
+          ESLITE_STORAGE_STATE_B64: ${{ secrets.ESLITE_STORAGE_STATE_B64 }}
+        run: |
+          if [ -n "$ESLITE_STORAGE_STATE_B64" ]; then
+            echo "$ESLITE_STORAGE_STATE_B64" | base64 -d > eslite_monitor/eslite_storage_state.json
+            echo "已從 secret 還原 session 狀態"
+          fi
+
+      - name: Run checkout test
+        env:
+          GMAIL_SENDER:        ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD:      ${{ secrets.GMAIL_PASSWORD }}
+          ESLITE_PASSWORD:     ${{ secrets.ESLITE_PASSWORD }}
+          CHECKOUT_CITY:       ${{ secrets.CHECKOUT_CITY }}
+          CHECKOUT_STORE_CODE: ${{ secrets.CHECKOUT_STORE_CODE }}
+          HEADLESS:            'true'
+          CHECK_ROUNDS:        '3'
+          CHECKOUT_MAX:        '1'
+          STORAGE_STATE_FILE:  'eslite_storage_state.json'
+          ORDER_STATE_FILE:    'eslite_test_order_state.json'
+          AUTO_CHECKOUT:       'true'
+        working-directory: eslite_monitor
+        run: python eslite_test_checkout.py
