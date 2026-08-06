@@ -34,6 +34,9 @@ if not TEST_ACCOUNT:
 if not TEST_RECIPIENT:
     raise ValueError("TEST_RECIPIENT_EMAIL 未設定（請設定 GitHub Secret）")
 
+# 基底類別 __init__ 以 os.environ["GMAIL_RECIPIENTS"] 讀取（非 .get()），需在此預設
+os.environ.setdefault("GMAIL_RECIPIENTS", TEST_RECIPIENT)
+
 
 class TestCheckoutMonitor(EsliteMonitorBase):
 
