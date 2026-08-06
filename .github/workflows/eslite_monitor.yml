@@ -80,7 +80,7 @@ jobs:
           ORDER_RECIPIENT:      ${{ secrets.ORDER_RECIPIENT }}
           CHECKOUT_CITY:        ${{ secrets.CHECKOUT_CITY }}
           CHECKOUT_STORE_CODE:  ${{ secrets.CHECKOUT_STORE_CODE }}
-          AUTO_CHECKOUT:        'true'
+          AUTO_CHECKOUT:        'false'
           HEADLESS:             'true'
           MONITOR_MODE:         'exhibition'
           CHECK_ROUNDS:         ${{ inputs.check_rounds || '50' }}
