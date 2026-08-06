@@ -64,6 +64,7 @@ jobs:
           TEST_ESLITE_ACCOUNT:   ${{ secrets.TEST_ESLITE_ACCOUNT }}
           TEST_RECIPIENT_EMAIL:  ${{ secrets.TEST_RECIPIENT_EMAIL }}
           TEST_EXHIBITION_URL:   ${{ vars.TEST_EXHIBITION_URL }}
+          GMAIL_RECIPIENTS:      ${{ secrets.TEST_RECIPIENT_EMAIL }}
           HEADLESS:              'true'
           CHECK_ROUNDS:          '3'
           CHECKOUT_MAX:          '1'
