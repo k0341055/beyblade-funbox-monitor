@@ -80,6 +80,7 @@ jobs:
           ORDER_RECIPIENT:      ${{ secrets.ORDER_RECIPIENT }}
           CHECKOUT_CITY:        ${{ secrets.CHECKOUT_CITY }}
           CHECKOUT_STORE_CODE:  ${{ secrets.CHECKOUT_STORE_CODE }}
+          ESLITE_EVENT_URL:     ${{ vars.ESLITE_EVENT_URL }}
           AUTO_CHECKOUT:        'true'
           HEADLESS:             'true'
           MONITOR_MODE:         'product'

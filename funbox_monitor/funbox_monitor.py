@@ -27,10 +27,9 @@ load_dotenv()
 # 設定區
 # ─────────────────────────────────────────────
 
-COLLECTION_URL = os.environ.get(
-    "SEARCH_URL",
-    "https://shop.funbox.com.tw/collections/%E6%88%B0%E9%AC%A5%E9%99%80%E8%9E%BA",
-)
+COLLECTION_URL = os.environ.get("SEARCH_URL", "").strip()
+if not COLLECTION_URL:
+    raise ValueError("SEARCH_URL 環境變數未設定（請設定 GitHub Variable FUNBOX_SEARCH_URL）")
 API_URL = f"{COLLECTION_URL}/products.json"
 BASE_URL = "https://shop.funbox.com.tw"
 

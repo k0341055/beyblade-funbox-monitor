@@ -49,12 +49,14 @@ jobs:
             funbox-seen-
 
       - name: Test Funbox connection
+        env:
+          SEARCH_URL: ${{ vars.FUNBOX_SEARCH_URL }}
         run: |
           echo "=== DNS ==="
           nslookup shop.funbox.com.tw || true
           echo "=== HTTPS ==="
           curl -sv --connect-timeout 5 --max-time 15 \
-            "https://shop.funbox.com.tw/collections/%E6%88%B0%E9%AC%A5%E9%99%80%E8%9E%BA/products.json" \
+            "${SEARCH_URL}/products.json" \
             -o /dev/null 2>&1 | grep -E "Connected|HTTP|< HTTP|curl:" || true
 
       - name: Run Funbox monitor
@@ -68,6 +70,7 @@ jobs:
           FUNBOX_PASSWORD_2: ${{ secrets.FUNBOX_PASSWORD_2 }}
           FUNBOX_EMAIL_3:    ${{ secrets.FUNBOX_EMAIL_3 }}
           FUNBOX_PASSWORD_3: ${{ secrets.FUNBOX_PASSWORD_3 }}
+          SEARCH_URL:        ${{ vars.FUNBOX_SEARCH_URL }}
           CHECK_ROUNDS:      ${{ inputs.check_rounds || '60' }}
           STATE_FILE:        'seen_products.json'
         working-directory: funbox_monitor

@@ -58,7 +58,7 @@ class EsliteMonitorBase(ABC):
         _extra_env = os.environ.get("ESLITE_EXTRA_PRODUCTS", "").strip()
         self.EXTRA_PRODUCT_GUIDS = [
             g.strip()
-            for g in (_extra_env or "10022136782683190211005").split(",")
+            for g in _extra_env.split(",")
             if g.strip()
         ]
         self.CHECK_ROUNDS = int(os.environ.get("CHECK_ROUNDS", "1"))
@@ -82,6 +82,7 @@ class EsliteMonitorBase(ABC):
 
         _recip_raw = [r.strip() for r in os.environ.get("ORDER_RECIPIENT", "").split(",") if r.strip()]
         self.ORDER_RECIPIENTS = _recip_raw or self.GMAIL_RECIPIENTS[:1]
+        self.EVENT_PAGE_URL = os.environ.get("ESLITE_EVENT_URL", "").strip()
 
         # 記憶體內追蹤（僅本次執行有效），防止同一 run 內重複清空購物車
         self._cart_added_guids: set = set()
@@ -445,7 +446,8 @@ class EsliteMonitorBase(ABC):
                 f"商品連結：{p['url']}",
                 "-" * 40,
             ]
-        lines += ["", f"完整專區頁：{self.ESLITE_BASE}/event/CU202503-00091"]
+        if self.EVENT_PAGE_URL:
+            lines += ["", f"完整專區頁：{self.EVENT_PAGE_URL}"]
         self._send_email(self.GMAIL_RECIPIENTS, subject, "\n".join(lines))
 
     def _notify_cart_added(self, products: list):
@@ -649,10 +651,9 @@ class ExhibitionMonitor(EsliteMonitorBase):
 
     def __init__(self):
         super().__init__()
-        self.API_URL = os.environ.get(
-            "ESLITE_API_URL",
-            "https://athena.eslite.com/api/v1/book_exhibits/CU202503-00091",
-        )
+        self.API_URL = os.environ.get("ESLITE_API_URL", "").strip()
+        if not self.API_URL:
+            raise ValueError("ESLITE_API_URL 環境變數未設定（請設定 GitHub Variable ESLITE_API_URL）")
 
     def _extract_products(self, data: dict) -> dict:
         """遞迴解析書展 JSON，找出所有含 product_guid + name 的節點。"""
