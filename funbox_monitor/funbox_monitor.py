@@ -93,6 +93,8 @@ _CHECKOUT_STOCK_OUT_TEXTS = ["庫存不足", "數量不足", "已無庫存", "�
 # 商品名稱含以下任一關鍵字 → 整輪靜默略過（不通知、不下單）
 # APP 限定商品由 auto_buy_all 另行處理（仍會通知），故不需列於此
 SKIP_KEYWORDS: list[str] = [
+    "app",
+    "APP",
     "BX-33",
     "BX-26",
     "暴風天馬",
