@@ -67,7 +67,7 @@ class TestCheckoutMonitor(EsliteMonitorBase):
                 if guid and guid not in seen:
                     seen.add(guid)
                     guids.append(guid)
-
+        guids = guids[:10]
         log.info(f"書展頁抽取到 {len(guids)} 個商品 GUID")
 
         result = []
