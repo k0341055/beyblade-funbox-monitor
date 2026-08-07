@@ -67,7 +67,7 @@ jobs:
           GMAIL_RECIPIENTS:      ${{ secrets.TEST_RECIPIENT_EMAIL }}
           HEADLESS:              'true'
           CHECK_ROUNDS:          '3'
-          CHECKOUT_MAX:          '1'
+          CHECKOUT_MAX:          '3'
           STORAGE_STATE_FILE:    'eslite_storage_state.json'
           ORDER_STATE_FILE:      'eslite_test_order_state.json'
           AUTO_CHECKOUT:         'true'
