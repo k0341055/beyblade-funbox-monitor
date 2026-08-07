@@ -443,32 +443,59 @@ class EsliteMonitorBase(ABC):
     # ── Email 通知 ────────────────────────────
 
     def _notify_products(self, products: list):
-        count   = len(products)
-        subject = f"【誠品有貨了！】偵測到 {count} 件商品"
-        lines   = [
-            f"誠品戰鬥陀螺專區偵測到共 {count} 件有庫存商品",
-            f"偵測時間：{datetime.now(self.TW_TZ).strftime('%Y-%m-%d %H:%M:%S')}（台灣時間）",
-            "",
-            f">>> 立即結帳：{self.ESLITE_BASE}/cart/step2",
-            f">>> 查看購物車：{self.ESLITE_BASE}/cart",
-            "", "=" * 50,
-        ]
-        for i, p in enumerate(products, 1):
-            acct_lim  = p.get("account_qty_limit")
-            ord_lim   = p.get("order_qty_limit")
-            purchased = self._is_purchased(p)
-            lines += [
-                f"\n【商品 {i}】{'【已購買，僅通知不下單】' if purchased else ''}",
-                f"商品名：{p['name']}",
-                f"庫存：{p['stock']} 件",
-                f"帳號上限：{'無限制' if acct_lim is None else f'{acct_lim} 件'}",
-                f"每單上限：{'無限制' if ord_lim is None else f'{ord_lim} 件'}",
-                f"商品連結：{p['url']}",
-                "-" * 40,
+        regular   = [p for p in products if not self._is_purchased(p)]
+        purchased = [p for p in products if self._is_purchased(p)]
+
+        if regular:
+            count   = len(regular)
+            subject = f"【誠品有貨了！】偵測到 {count} 件商品"
+            lines   = [
+                f"誠品戰鬥陀螺專區偵測到共 {count} 件有庫存商品",
+                f"偵測時間：{datetime.now(self.TW_TZ).strftime('%Y-%m-%d %H:%M:%S')}（台灣時間）",
+                "",
+                f">>> 立即結帳：{self.ESLITE_BASE}/cart/step2",
+                f">>> 查看購物車：{self.ESLITE_BASE}/cart",
+                "", "=" * 50,
             ]
-        if self.EVENT_PAGE_URL:
-            lines += ["", f"完整專區頁：{self.EVENT_PAGE_URL}"]
-        self._send_email(self.GMAIL_RECIPIENTS, subject, "\n".join(lines))
+            for i, p in enumerate(regular, 1):
+                acct_lim = p.get("account_qty_limit")
+                ord_lim  = p.get("order_qty_limit")
+                lines += [
+                    f"\n【商品 {i}】",
+                    f"商品名：{p['name']}",
+                    f"庫存：{p['stock']} 件",
+                    f"帳號上限：{'無限制' if acct_lim is None else f'{acct_lim} 件'}",
+                    f"每單上限：{'無限制' if ord_lim is None else f'{ord_lim} 件'}",
+                    f"商品連結：{p['url']}",
+                    "-" * 40,
+                ]
+            if self.EVENT_PAGE_URL:
+                lines += ["", f"完整專區頁：{self.EVENT_PAGE_URL}"]
+            self._send_email(self.GMAIL_RECIPIENTS, subject, "\n".join(lines))
+
+        if purchased:
+            count   = len(purchased)
+            subject = f"【誠品有貨！已購買商品】偵測到 {count} 件"
+            lines   = [
+                "您已購買的商品有庫存，僅通知，不自動下單。",
+                f"偵測時間：{datetime.now(self.TW_TZ).strftime('%Y-%m-%d %H:%M:%S')}（台灣時間）",
+                "", "=" * 50,
+            ]
+            for i, p in enumerate(purchased, 1):
+                acct_lim = p.get("account_qty_limit")
+                ord_lim  = p.get("order_qty_limit")
+                lines += [
+                    f"\n【商品 {i}】【已購買，僅通知不下單】",
+                    f"商品名：{p['name']}",
+                    f"庫存：{p['stock']} 件",
+                    f"帳號上限：{'無限制' if acct_lim is None else f'{acct_lim} 件'}",
+                    f"每單上限：{'無限制' if ord_lim is None else f'{ord_lim} 件'}",
+                    f"商品連結：{p['url']}",
+                    "-" * 40,
+                ]
+            if self.EVENT_PAGE_URL:
+                lines += ["", f"完整專區頁：{self.EVENT_PAGE_URL}"]
+            self._send_email(self.ORDER_RECIPIENTS, subject, "\n".join(lines))
 
     def _notify_cart_added(self, products: list):
         count   = len(products)
