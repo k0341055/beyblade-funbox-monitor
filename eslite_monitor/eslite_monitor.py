@@ -91,6 +91,18 @@ class EsliteMonitorBase(ABC):
         self._login_fail_count: int = 0
         self.LOGIN_FAIL_MAX: int = 2
 
+        # 已購買商品關鍵字（ESLITE_PURCHASED_NAMES，逗號分隔商品型號）
+        # 符合的商品：發通知但跳過自動下單
+        _purchased_env = os.environ.get("ESLITE_PURCHASED_NAMES", "").strip()
+        self.PURCHASED_NAMES: list = [
+            n.strip().upper() for n in _purchased_env.split(",") if n.strip()
+        ]
+
+    def _is_purchased(self, product: dict) -> bool:
+        """判斷商品名稱是否符合已購買關鍵字（大小寫不分）。"""
+        name = product.get("name", "").upper()
+        return any(kw in name for kw in self.PURCHASED_NAMES)
+
     # ── 抽象介面 ──────────────────────────────
 
     @abstractmethod
@@ -442,10 +454,11 @@ class EsliteMonitorBase(ABC):
             "", "=" * 50,
         ]
         for i, p in enumerate(products, 1):
-            acct_lim = p.get("account_qty_limit")
-            ord_lim  = p.get("order_qty_limit")
+            acct_lim  = p.get("account_qty_limit")
+            ord_lim   = p.get("order_qty_limit")
+            purchased = self._is_purchased(p)
             lines += [
-                f"\n【商品 {i}】",
+                f"\n【商品 {i}】{'【已購買，僅通知不下單】' if purchased else ''}",
                 f"商品名：{p['name']}",
                 f"庫存：{p['stock']} 件",
                 f"帳號上限：{'無限制' if acct_lim is None else f'{acct_lim} 件'}",
@@ -544,10 +557,12 @@ class EsliteMonitorBase(ABC):
         ordered  = self._load_order_state()
         to_order = [
             p for p in in_stock_products
-            if p["guid"] not in ordered and p["guid"] not in self._cart_added_guids
+            if p["guid"] not in ordered
+            and p["guid"] not in self._cart_added_guids
+            and not self._is_purchased(p)
         ][:self.CHECKOUT_MAX]
         if not to_order:
-            log.info("所有有庫存商品均已下單過（限購一次），跳過自動下單")
+            log.info("所有有庫存商品均已下單或已購買（限購一次），跳過自動下單")
             return
 
         log.info(f"準備加入購物車 {len(to_order)} 件（CHECKOUT_MAX={self.CHECKOUT_MAX}）")
