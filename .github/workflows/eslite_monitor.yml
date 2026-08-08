@@ -83,6 +83,7 @@ jobs:
           ESLITE_API_URL:          ${{ vars.ESLITE_API_URL }}
           ESLITE_EVENT_URL:        ${{ vars.ESLITE_EVENT_URL }}
           ESLITE_PURCHASED_NAMES:  ${{ secrets.ESLITE_PURCHASED_NAMES }}
+          MONITOR_KEYWORDS:        ${{ vars.MONITOR_KEYWORDS }}
           AUTO_CHECKOUT:           'false'
           HEADLESS:             'true'
           MONITOR_MODE:         'exhibition'

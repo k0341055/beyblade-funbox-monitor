@@ -720,6 +720,10 @@ class ExhibitionMonitor(EsliteMonitorBase):
         self.API_URL = os.environ.get("ESLITE_API_URL", "").strip()
         if not self.API_URL:
             raise ValueError("ESLITE_API_URL 環境變數未設定（請設定 GitHub Variable ESLITE_API_URL）")
+        _kw_env = os.environ.get("MONITOR_KEYWORDS", "").strip()
+        self.MONITOR_KEYWORDS: list = [
+            k.strip().upper() for k in _kw_env.split(",") if k.strip()
+        ]
 
     def _extract_products(self, data: dict) -> dict:
         """遞迴解析書展 JSON，找出所有含 product_guid + name 的節點。"""
@@ -769,6 +773,13 @@ class ExhibitionMonitor(EsliteMonitorBase):
             raw = page.inner_text("body")
 
         all_products = self._extract_products(json.loads(raw))
+
+        if self.MONITOR_KEYWORDS:
+            all_products = {
+                guid: p for guid, p in all_products.items()
+                if any(kw in p["name"].upper() for kw in self.MONITOR_KEYWORDS)
+            }
+
         result = []
         for guid, p in all_products.items():
             name  = p["name"]
@@ -780,9 +791,13 @@ class ExhibitionMonitor(EsliteMonitorBase):
             result.append({"guid": guid, **p})
 
         if len(all_products) == 0:
-            log.warning("展覽 API 回傳 0 件商品（書展可能已下架或 URL 已更換），繼續監控")
+            if self.MONITOR_KEYWORDS:
+                log.warning(f"展覽 API 未找到含關鍵字 {self.MONITOR_KEYWORDS} 的商品，繼續監控")
+            else:
+                log.warning("展覽 API 回傳 0 件商品（書展可能已下架或 URL 已更換），繼續監控")
         else:
-            log.info(f"展覽 API 抽取 {len(all_products)} 件，有庫存 {len(result)} 件")
+            kw_note = f"（關鍵字篩選後）" if self.MONITOR_KEYWORDS else ""
+            log.info(f"展覽 API 抽取 {len(all_products)} 件{kw_note}，有庫存 {len(result)} 件")
         return result
 
 
