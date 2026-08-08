@@ -779,7 +779,10 @@ class ExhibitionMonitor(EsliteMonitorBase):
             log.info(f"有庫存 → {name} | 庫存:{stock} 件 | {lim} | {p['status']}")
             result.append({"guid": guid, **p})
 
-        log.info(f"展覽 API 抽取 {len(all_products)} 件，有庫存 {len(result)} 件")
+        if len(all_products) == 0:
+            log.warning("展覽 API 回傳 0 件商品（書展可能已下架或 URL 已更換），繼續監控")
+        else:
+            log.info(f"展覽 API 抽取 {len(all_products)} 件，有庫存 {len(result)} 件")
         return result
 
 
