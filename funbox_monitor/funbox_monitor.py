@@ -275,13 +275,13 @@ def get_target_qty(p: dict) -> int:
     因此一般款採保守策略，優先確保訂單成立，而非搶加最多。
     """
     inventory = p["inventory"]
-    qty_cap = p.get("qty_cap")
+    # qty_cap = p.get("qty_cap")
     title = p["title"].upper()
 
-    if qty_cap is not None:
-        qty = max(1, min(CART_QTY, inventory, qty_cap))
-        log.info(f"  數量決策：API qc={qty_cap} → {qty} 件")
-        return qty
+    # if qty_cap is not None:
+        # qty = max(1, min(CART_QTY, inventory, qty_cap))
+        # log.info(f"  數量決策：API qc={qty_cap} → {qty} 件")
+        # return qty
 
     if any(k.upper() in title for k in _RANDOM_KEYWORDS):
         qty = min(3, inventory)
