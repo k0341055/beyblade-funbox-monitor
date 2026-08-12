@@ -283,7 +283,8 @@ def get_target_qty(p: dict) -> int:
         # log.info(f"  數量決策：API qc={qty_cap} → {qty} 件")
         # return qty
 
-    if any(k.upper() in title for k in _RANDOM_KEYWORDS):
+    # if any(k.upper() in title for k in _RANDOM_KEYWORDS):
+    if is_random_product(p):
         qty = min(3, inventory)
         log.info(f"  數量決策：隨機強化組/抽抽包 → {qty} 件")
         return qty
