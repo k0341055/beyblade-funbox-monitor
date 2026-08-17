@@ -298,16 +298,18 @@ def get_target_qty(p: dict) -> int:
 
 
 # ─────────────────────────────────────────────
-# 登入 + 加入購物車（requests）
+# 登入 + 逐件加購結帳（requests + Playwright）
 # ─────────────────────────────────────────────
 
 
-def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
+def _checkout_for_account(email: str, password: str, products: list) -> dict:
     """
-    登入並將所有商品加入購物車（每件先試 CART_QTY，失敗則試 1）。
-    回傳 (added_hrefs, attempted_hrefs, cart_url, cookies_list)。
-    attempted 是實際有嘗試加購的 href 清單；未傳入 products 的商品不在其中。
+    登入一次 → 逐件商品：清空購物車 → 加一件 → 立即結帳。
+    回傳 {"added": [...hrefs], "attempted": [...hrefs], "checkout": {href: status}}。
     """
+    attempted = [p["href"] for p in products]
+
+    # ── 登入 ──
     sess = requests.Session()
     sess.headers["User-Agent"] = _UA
     try:
@@ -315,8 +317,7 @@ def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
         token = _extract_csrf(r.text)
         if not token:
             log.error(f"[{email}] 登入頁找不到 CSRF token")
-            return [], [], None, None
-
+            return {"added": [], "attempted": attempted, "checkout": {}}
         r = sess.post(
             f"{BASE_URL}/account/login",
             data={
@@ -329,73 +330,85 @@ def _login_and_fill_cart(email: str, password: str, products: list) -> tuple:
         )
         if "login" in r.url:
             log.error(f"[{email}] 登入失敗，停在 {r.url}")
-            return [], [], None, None
+            return {"added": [], "attempted": attempted, "checkout": {}}
         log.info(f"[{email}] 登入成功")
+    except Exception as e:
+        log.error(f"[{email}] 登入例外：{e}")
+        return {"added": [], "attempted": attempted, "checkout": {}}
 
-        added = []
-        attempted = []
-        for p in products:
-            vid = p["variant_id"]
-            target_qty = get_target_qty(p)
-            attempted.append(p["href"])
+    added = []
+    checkout_statuses = {}
 
-            r2 = sess.post(
+    for p in products:
+        vid = p["variant_id"]
+        target_qty = get_target_qty(p)
+
+        # ── 清空購物車 ──
+        try:
+            cart_js = sess.get(f"{BASE_URL}/cart.js", timeout=10).json()
+            updates = {str(item["variant_id"]): 0 for item in cart_js.get("items", [])}
+            if updates:
+                sess.post(f"{BASE_URL}/cart/update.js", json={"updates": updates}, timeout=10)
+                log.info(f"[{email}] 購物車已清空（{len(updates)} 項）")
+        except Exception as e:
+            log.warning(f"[{email}] 購物車清空失敗：{e}")
+
+        # ── 加入購物車 ──
+        r2 = sess.post(
+            f"{BASE_URL}/cart/add",
+            data={"id": vid, "quantity": target_qty},
+            headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
+            timeout=30,
+        )
+        if r2.status_code == 200:
+            log.info(f"[{email}] 加入購物車：{p['title']} x{target_qty}")
+        elif target_qty > 1:
+            log.warning(f"[{email}] 加購 x{target_qty} 失敗：{p['title']} | HTTP {r2.status_code}")
+            r3 = sess.post(
                 f"{BASE_URL}/cart/add",
-                data={"id": vid, "quantity": target_qty},
+                data={"id": vid, "quantity": 1},
                 headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
                 timeout=30,
             )
-            if r2.status_code == 200:
-                log.info(f"[{email}] 加入購物車：{p['title']} x{target_qty}")
-                added.append(p["href"])
+            if r3.status_code == 200:
+                log.info(f"[{email}] 加入購物車：{p['title']} x1（降量重試）")
             else:
-                # 409 / 其他非 200 → 視為加購失敗，降量至 1 重試
-                log.warning(
-                    f"[{email}] 加購 x{target_qty} 失敗：{p['title']} "
-                    f"| HTTP {r2.status_code} | {r2.text[:200]}"
-                )
-                if target_qty > 1:
-                    r3 = sess.post(
-                        f"{BASE_URL}/cart/add",
-                        data={"id": vid, "quantity": 1},
-                        headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
-                        timeout=30,
-                    )
-                    if r3.status_code == 200:
-                        log.info(f"[{email}] 加入購物車：{p['title']} x1（降量重試成功）")
-                        added.append(p["href"])
-                    else:
-                        log.error(
-                            f"[{email}] x1 仍加入失敗：{p['title']} "
-                            f"| HTTP {r3.status_code} | {r3.text[:200]}"
-                        )
-                else:
-                    log.error(f"[{email}] 無法加入購物車：{p['title']} (HTTP {r2.status_code})")
+                log.error(f"[{email}] 無法加入購物車：{p['title']} (HTTP {r3.status_code})")
+                checkout_statuses[p["href"]] = "failed"
+                continue
+        else:
+            log.error(f"[{email}] 無法加入購物車：{p['title']} (HTTP {r2.status_code})")
+            checkout_statuses[p["href"]] = "failed"
+            continue
 
-        if not added:
-            log.error(f"[{email}] 所有商品均加入失敗")
-            return [], attempted, None, None
+        added.append(p["href"])
 
-        r = sess.get(f"{BASE_URL}/cart", allow_redirects=True, timeout=30)
-        cart_url = r.url
-        if "/carts/" not in cart_url:
-            log.error(f"[{email}] 購物車頁面異常（{cart_url}），session 可能失效或購物車為空")
-            return [], attempted, None, None
+        # ── 取得購物車 URL ──
+        try:
+            r_cart = sess.get(f"{BASE_URL}/cart", allow_redirects=True, timeout=30)
+            cart_url = r_cart.url
+            if "/carts/" not in cart_url:
+                log.error(f"[{email}] 購物車頁面異常（{cart_url}）")
+                checkout_statuses[p["href"]] = "failed"
+                continue
+        except Exception as e:
+            log.error(f"[{email}] 取得購物車 URL 例外：{e}")
+            checkout_statuses[p["href"]] = "failed"
+            continue
+
         cookies_list = [
-            {
-                "name": c.name,
-                "value": c.value,
-                "domain": c.domain or "shop.funbox.com.tw",
-                "path": c.path or "/",
-            }
+            {"name": c.name, "value": c.value,
+             "domain": c.domain or "shop.funbox.com.tw", "path": c.path or "/"}
             for c in sess.cookies
         ]
-        log.info(f"[{email}] 購物車 URL：{cart_url}，共加入 {len(added)}/{len(attempted)} 件商品")
-        return added, attempted, cart_url, cookies_list
+        log.info(f"[{email}] 購物車 URL：{cart_url}，開始結帳：{p['title']}")
 
-    except Exception as e:
-        log.error(f"[{email}] 登入/加購例外：{e}")
-        return [], [], None, None
+        # ── Playwright 結帳 ──
+        status = _playwright_checkout(email, cart_url, cookies_list)
+        checkout_statuses[p["href"]] = status
+        log.info(f"[{email}] 結帳結果：{p['title']} → {status}")
+
+    return {"added": added, "attempted": attempted, "checkout": checkout_statuses}
 
 
 # ─────────────────────────────────────────────
@@ -450,25 +463,6 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
                     continue
             if not clicked_711:
                 log.warning(f"[{email}] 找不到 7-11 按鈕，繼續嘗試結帳")
-
-            # 紅利點數重設為 0（避免自動折抵影響訂單金額）
-            try:
-                bonus_input = page.get_by_role(
-                    "spinbutton", name="請輸入會員紅利折抵點數"
-                ).first
-                if bonus_input.count() > 0 and bonus_input.is_visible():
-                    bonus_input.click()
-                    bonus_input.press("ControlOrMeta+a")
-                    bonus_input.fill("0")
-                    confirm_bonus = page.get_by_role("button", name="確認").first
-                    if confirm_bonus.count() > 0 and confirm_bonus.is_visible():
-                        confirm_bonus.click()
-                        page.wait_for_timeout(800)
-                        log.info(f"[{email}] 紅利點數已設為 0")
-                    else:
-                        log.warning(f"[{email}] 找不到紅利確認按鈕")
-            except Exception as e:
-                log.warning(f"[{email}] 紅利點數重設例外：{e}")
 
             # 勾選所有同意條款 checkbox
             for cb in page.locator("input[type='checkbox']").all():
@@ -546,15 +540,6 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
 # ─────────────────────────────────────────────
 # 單一帳號完整流程
 # ─────────────────────────────────────────────
-
-
-def _checkout_for_account(email: str, password: str, products: list) -> dict:
-    """登入 → 全部加入購物車 → 一次結帳。"""
-    added, attempted, cart_url, cookies_list = _login_and_fill_cart(email, password, products)
-    if not cart_url:
-        return {"added": [], "attempted": attempted, "checkout": "failed"}
-    checkout = _playwright_checkout(email, cart_url, cookies_list)
-    return {"added": added, "attempted": attempted, "checkout": checkout}
 
 
 # ─────────────────────────────────────────────
@@ -702,10 +687,17 @@ def _broadcast_email(products: list, account_results: dict = None) -> None:
     if account_results:
         lines += ["", "=" * 50, "自動下單摘要", "=" * 50]
         for acct_email, result in account_results.items():
-            label = _CHECKOUT_LABEL.get(result.get("checkout", ""), result.get("checkout", ""))
+            checkout = result.get("checkout", {})
             n_added = len(result.get("added", []))
             n_tried = len(result.get("attempted", []))
-            lines.append(f"▸ {acct_email}：{label}（加入 {n_added}/{n_tried} 件）")
+            if isinstance(checkout, dict) and checkout:
+                for href, status in checkout.items():
+                    label = _CHECKOUT_LABEL.get(status, status)
+                    p_obj = next((p for p in products if p["href"] == href), None)
+                    title_short = p_obj["title"][:25] if p_obj else href[:25]
+                    lines.append(f"▸ {acct_email} | {title_short}：{label}")
+            else:
+                lines.append(f"▸ {acct_email}：（加入 {n_added}/{n_tried} 件，無結帳結果）")
         lines.append("")
         lines.append("📧 各帳號詳細結帳資訊已個別寄送至對應信箱")
 
@@ -716,39 +708,47 @@ def _broadcast_email(products: list, account_results: dict = None) -> None:
 def _personal_checkout_email(acct_email: str, result: dict, products: list) -> None:
     """
     個人結帳通知：只寄給該 Funbox 帳號本人（前提是該 email 在 GMAIL_RECIPIENTS 中）。
-    包含該帳號每件商品的加購狀態與結帳結果。
+    包含該帳號每件商品的逐件結帳結果。
     """
-    attempted = result.get("attempted", [])
-    added = result.get("added", [])
-    checkout = result.get("checkout", "failed")
-    label = _CHECKOUT_LABEL.get(checkout, checkout)
+    checkout = result.get("checkout", {})
     test_tag = "【測試】" if TEST_MODE else ""
-    subject = f"{test_tag}【Funbox 你的結帳結果】{label}"
+
+    statuses = list(checkout.values()) if isinstance(checkout, dict) else []
+    if "success" in statuses:
+        overall_label = _CHECKOUT_LABEL["success"]
+    elif "3ds_pending" in statuses:
+        overall_label = _CHECKOUT_LABEL["3ds_pending"]
+    elif "payment_failed" in statuses:
+        overall_label = _CHECKOUT_LABEL["payment_failed"]
+    elif statuses:
+        overall_label = _CHECKOUT_LABEL.get(statuses[0], statuses[0])
+    else:
+        overall_label = "未完成"
+
+    subject = f"{test_tag}【Funbox 你的結帳結果】{overall_label}"
+    has_pending = any(s in ("3ds_pending", "payment_failed") for s in statuses)
 
     lines = [
         f"帳號：{acct_email}",
-        f"結帳結果：{label}",
         f"偵測時間：{datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M:%S')}（台灣時間）",
         "",
         "=" * 50,
-        "各商品加購狀態",
+        "各商品結帳結果",
         "=" * 50,
     ]
 
     for p in products:
         if any(kw.upper() in p["title"].upper() for kw in SKIP_BUY_KEYWORDS):
-            status = "— 略過自動購買"
-        elif p["href"] in added:
-            status = f"✅ 已加入購物車（x{get_target_qty(p)} 件）"
-        elif p["href"] in attempted:
-            status = "❌ 加入失敗（受限或錯誤）"
+            status_str = "— 略過自動購買"
+        elif isinstance(checkout, dict) and p["href"] in checkout:
+            status_str = _CHECKOUT_LABEL.get(checkout[p["href"]], checkout[p["href"]])
         else:
-            status = "— 未嘗試（超出本次購買上限）"
-        lines.append(f"▸ {p['title']}：{status}")
+            status_str = "— 未嘗試"
+        lines.append(f"▸ {p['title']}：{status_str}")
 
     lines += ["", f"完整商品頁：{COLLECTION_URL}"]
 
-    if checkout in ("3ds_pending", "payment_failed"):
+    if has_pending:
         lines += [
             "",
             "⚠ 訂單已建立但付款未完成，請盡快前往補繳，否則訂單將自動取消：",
@@ -817,23 +817,19 @@ def check_once() -> bool:
             account_results = auto_buy_all(to_notify, purchased, attempts)
 
             for acct_email, result in account_results.items():
-                checkout = result.get("checkout", "failed")
-                if checkout == "success":
-                    # 結帳成功 → 記錄已購買（所有加入購物車的商品）
-                    for href in result.get("added", []):
+                checkout = result.get("checkout", {})
+                for href, status in checkout.items():
+                    if status == "success":
                         purchased.setdefault(href, [])
                         if acct_email not in purchased[href]:
                             purchased[href].append(acct_email)
                             p_obj = next((x for x in to_notify if x["href"] == href), None)
                             log.info(f"已記錄購買成功：{acct_email} → {p_obj['title'] if p_obj else href}")
-                else:
-                    # 結帳失敗或被限購攔截 → 累加失敗嘗試次數（下次仍試，第三次才跳過）
-                    for href in result.get("attempted", []):
+                    else:
                         if acct_email not in purchased.get(href, []):
                             attempts.setdefault(href, {})
                             attempts[href][acct_email] = attempts[href].get(acct_email, 0) + 1
-                            cnt = attempts[href][acct_email]
-                            log.info(f"[{acct_email}] 記錄失敗嘗試 #{cnt}：{href}")
+                            log.info(f"[{acct_email}] 記錄失敗嘗試 #{attempts[href][acct_email]}：{href}")
 
             log.info(
                 f"發送通知：{len(to_notify)} 件"
