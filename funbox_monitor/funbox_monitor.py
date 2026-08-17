@@ -307,9 +307,11 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
     登入一次 → 逐件商品：清空購物車 → 加一件 → 立即結帳。
     回傳 {"added": [...hrefs], "attempted": [...hrefs], "checkout": {href: status}}。
     """
+    import time as _time
     attempted = [p["href"] for p in products]
 
     # ── 登入 ──
+    t0 = _time.perf_counter()
     sess = requests.Session()
     sess.headers["User-Agent"] = _UA
     try:
@@ -331,7 +333,7 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
         if "login" in r.url:
             log.error(f"[{email}] 登入失敗，停在 {r.url}")
             return {"added": [], "attempted": attempted, "checkout": {}}
-        log.info(f"[{email}] 登入成功")
+        log.info(f"[{email}] ⏱ 登入成功（{_time.perf_counter()-t0:.2f}s）")
     except Exception as e:
         log.error(f"[{email}] 登入例外：{e}")
         return {"added": [], "attempted": attempted, "checkout": {}}
@@ -340,20 +342,26 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
     checkout_statuses = {}
 
     for p in products:
+        t_product = _time.perf_counter()
         vid = p["variant_id"]
         target_qty = get_target_qty(p)
+        log.info(f"[{email}] ── 開始處理：{p['title']} ──")
 
         # ── 清空購物車 ──
+        t1 = _time.perf_counter()
         try:
             cart_js = sess.get(f"{BASE_URL}/cart.js", timeout=10).json()
             updates = {str(item["variant_id"]): 0 for item in cart_js.get("items", [])}
             if updates:
                 sess.post(f"{BASE_URL}/cart/update.js", json={"updates": updates}, timeout=10)
-                log.info(f"[{email}] 購物車已清空（{len(updates)} 項）")
+                log.info(f"[{email}] ⏱ 購物車已清空（{len(updates)} 項，{_time.perf_counter()-t1:.2f}s）")
+            else:
+                log.info(f"[{email}] ⏱ 購物車原本為空（{_time.perf_counter()-t1:.2f}s）")
         except Exception as e:
             log.warning(f"[{email}] 購物車清空失敗：{e}")
 
         # ── 加入購物車 ──
+        t2 = _time.perf_counter()
         r2 = sess.post(
             f"{BASE_URL}/cart/add",
             data={"id": vid, "quantity": target_qty},
@@ -361,7 +369,7 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
             timeout=30,
         )
         if r2.status_code == 200:
-            log.info(f"[{email}] 加入購物車：{p['title']} x{target_qty}")
+            log.info(f"[{email}] ⏱ 加入購物車：{p['title']} x{target_qty}（{_time.perf_counter()-t2:.2f}s）")
         elif target_qty > 1:
             log.warning(f"[{email}] 加購 x{target_qty} 失敗：{p['title']} | HTTP {r2.status_code}")
             r3 = sess.post(
@@ -371,7 +379,7 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
                 timeout=30,
             )
             if r3.status_code == 200:
-                log.info(f"[{email}] 加入購物車：{p['title']} x1（降量重試）")
+                log.info(f"[{email}] ⏱ 加入購物車：{p['title']} x1（降量重試，{_time.perf_counter()-t2:.2f}s）")
             else:
                 log.error(f"[{email}] 無法加入購物車：{p['title']} (HTTP {r3.status_code})")
                 checkout_statuses[p["href"]] = "failed"
@@ -384,6 +392,7 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
         added.append(p["href"])
 
         # ── 取得購物車 URL ──
+        t3 = _time.perf_counter()
         try:
             r_cart = sess.get(f"{BASE_URL}/cart", allow_redirects=True, timeout=30)
             cart_url = r_cart.url
@@ -391,6 +400,7 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
                 log.error(f"[{email}] 購物車頁面異常（{cart_url}）")
                 checkout_statuses[p["href"]] = "failed"
                 continue
+            log.info(f"[{email}] ⏱ 購物車 URL 取得（{_time.perf_counter()-t3:.2f}s）：{cart_url}")
         except Exception as e:
             log.error(f"[{email}] 取得購物車 URL 例外：{e}")
             checkout_statuses[p["href"]] = "failed"
@@ -401,12 +411,15 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
              "domain": c.domain or "shop.funbox.com.tw", "path": c.path or "/"}
             for c in sess.cookies
         ]
-        log.info(f"[{email}] 購物車 URL：{cart_url}，開始結帳：{p['title']}")
 
         # ── Playwright 結帳 ──
+        t4 = _time.perf_counter()
         status = _playwright_checkout(email, cart_url, cookies_list)
         checkout_statuses[p["href"]] = status
-        log.info(f"[{email}] 結帳結果：{p['title']} → {status}")
+        log.info(
+            f"[{email}] ⏱ 結帳完成：{p['title']} → {status}"
+            f"（Playwright {_time.perf_counter()-t4:.2f}s｜本件合計 {_time.perf_counter()-t_product:.2f}s）"
+        )
 
     return {"added": added, "attempted": attempted, "checkout": checkout_statuses}
 
@@ -427,6 +440,9 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
         log.error(f"[{email}] Playwright 未安裝")
         return "cart"
 
+    import time as _time
+    t_pw_start = _time.perf_counter()
+
     try:
         with sync_playwright() as pw:
             br = pw.chromium.launch(headless=True)
@@ -434,15 +450,17 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
             ctx.add_cookies(cookies_list)
             page = ctx.new_page()
 
+            t1 = _time.perf_counter()
             page.goto(cart_url, wait_until="domcontentloaded")
             page.wait_for_timeout(4000)
-            log.info(f"[{email}] 結帳頁：{page.url}")
+            log.info(f"[{email}] ⏱ 結帳頁載入（{_time.perf_counter()-t1:.2f}s）：{page.url}")
             if "/carts/" not in page.url:
                 log.error(f"[{email}] 結帳頁面異常（{page.url}），中止結帳")
                 br.close()
                 return "cart"
 
             # 選擇 7-11 取貨（貨到付款或先付款均可）
+            t2 = _time.perf_counter()
             clicked_711 = False
             for sel in [
                 "button[id^='cvs-shipping-button']",
@@ -456,13 +474,13 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
                     if btn.count() > 0 and btn.is_visible():
                         btn.click()
                         page.wait_for_timeout(1000)
-                        log.info(f"[{email}] 已選擇 7-11 取貨（{btn.inner_text()[:30].strip()}）")
+                        log.info(f"[{email}] ⏱ 7-11 按鈕點擊（{_time.perf_counter()-t2:.2f}s）：{btn.inner_text()[:30].strip()}")
                         clicked_711 = True
                         break
                 except Exception:
                     continue
             if not clicked_711:
-                log.warning(f"[{email}] 找不到 7-11 按鈕，繼續嘗試結帳")
+                log.warning(f"[{email}] ⏱ 找不到 7-11 按鈕（{_time.perf_counter()-t2:.2f}s），繼續嘗試結帳")
 
             # 勾選所有同意條款 checkbox
             for cb in page.locator("input[type='checkbox']").all():
@@ -473,7 +491,8 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
                 except Exception:
                     pass
 
-            # 點擊立即結帳（用 btn-lg 精確定位，跳過頂部 nav 的隱藏連結）
+            # 點擊立即結帳
+            t3 = _time.perf_counter()
             clicked_checkout = False
             for sel in [
                 "a.btn-lg:has-text('立即結帳')",
@@ -487,7 +506,7 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
                     if loc.count() > 0 and loc.is_visible():
                         loc.scroll_into_view_if_needed()
                         loc.click()
-                        log.info(f"[{email}] 已點擊立即結帳，等待跳轉...")
+                        log.info(f"[{email}] ⏱ 立即結帳點擊（{_time.perf_counter()-t3:.2f}s），等待跳轉...")
                         clicked_checkout = True
                         break
                 except Exception:
@@ -497,38 +516,37 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
                 br.close()
                 return "cart"
 
-            # 輪詢結果（7-11 COD 不經過 3DS，通常直接到訂單確認頁）
-            for _ in range(20):
+            # 輪詢結果
+            t4 = _time.perf_counter()
+            for poll in range(1, 21):
                 page.wait_for_timeout(1500)
                 url = page.url
                 if any(k in url for k in ("order", "thank", "complete", "success")):
                     if "show_failed" in url:
-                        log.warning(f"[{email}] 付款失敗（show_failed）：{url}")
+                        log.warning(f"[{email}] ⏱ 付款失敗 show_failed（輪詢第{poll}次，{_time.perf_counter()-t4:.2f}s）：{url}")
                         br.close()
                         return "payment_failed"
-                    log.info(f"[{email}] 結帳完成：{url}")
+                    log.info(f"[{email}] ⏱ 結帳確認頁（輪詢第{poll}次，{_time.perf_counter()-t4:.2f}s）：{url}")
                     br.close()
                     return "success"
-                # 萬一仍觸發 3DS（備用偵測）
                 if any(k in url for k in ("acs.", "challenge", "3ds", "sinopac", "esunbank", "authentication")):
-                    log.warning(f"[{email}] 觸發非預期 3DS：{url}")
+                    log.warning(f"[{email}] ⏱ 3DS 觸發（輪詢第{poll}次，{_time.perf_counter()-t4:.2f}s）：{url}")
                     br.close()
                     return "3ds_pending"
-                # URL 不變時掃描頁面文字，偵測限購攔截或商品售完
                 try:
                     body_text = page.locator("body").inner_text(timeout=500)
                     if any(kw in body_text for kw in _CHECKOUT_LIMIT_TEXTS):
-                        log.warning(f"[{email}] 結帳被限購攔截（頁面偵測）：{body_text[:300]}")
+                        log.warning(f"[{email}] ⏱ 限購攔截（輪詢第{poll}次，{_time.perf_counter()-t4:.2f}s）：{body_text[:200]}")
                         br.close()
                         return "checkout_limited"
                     if any(kw in body_text for kw in _CHECKOUT_STOCK_OUT_TEXTS):
-                        log.warning(f"[{email}] 結帳時商品已售完（頁面偵測）：{body_text[:300]}")
+                        log.warning(f"[{email}] ⏱ 商品售完（輪詢第{poll}次，{_time.perf_counter()-t4:.2f}s）：{body_text[:200]}")
                         br.close()
                         return "stock_out"
                 except Exception:
                     pass
 
-            log.warning(f"[{email}] 結帳後停在：{page.url}")
+            log.warning(f"[{email}] ⏱ 輪詢逾時（{_time.perf_counter()-t4:.2f}s），停在：{page.url}")
             br.close()
             return "cart"
 
