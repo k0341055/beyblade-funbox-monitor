@@ -56,6 +56,13 @@ def _extract_keyword(url: str) -> str:
 
 NOTIFY_KEYWORD = os.environ.get("PRODUCT_NAME", _extract_keyword(SEARCH_URL))
 
+# ── 略過通知的商品關鍵字 ──────────────────────────────
+# 商品名稱含以下任一關鍵字 → 整輪靜默略過（不通知）
+SKIP_KEYWORDS: list[str] = [
+    "BX-43",
+    "BX-25",
+]
+
 # ─────────────────────────────────────────────
 # 隨機 UA / Viewport（反 Cloudflare 指紋）
 # ─────────────────────────────────────────────
@@ -295,6 +302,20 @@ def send_notify_email(products: list):
 async def check_once(page) -> bool:
     try:
         products = await fetch_products(page)
+
+        if not products:
+            return False
+
+        # 略過 SKIP_KEYWORDS 商品（不通知）
+        if SKIP_KEYWORDS:
+            before = len(products)
+            products = [
+                p for p in products
+                if not any(kw.upper() in p["title"].upper() for kw in SKIP_KEYWORDS)
+            ]
+            skipped = before - len(products)
+            if skipped:
+                log.info(f"略過 {skipped} 件符合 SKIP_KEYWORDS 的商品")
 
         if not products:
             return False
