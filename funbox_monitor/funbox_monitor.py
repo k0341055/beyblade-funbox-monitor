@@ -350,13 +350,8 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
         # ── 清空購物車 ──
         t1 = _time.perf_counter()
         try:
-            cart_js = sess.get(f"{BASE_URL}/cart.js", timeout=10).json()
-            updates = {str(item["variant_id"]): 0 for item in cart_js.get("items", [])}
-            if updates:
-                sess.post(f"{BASE_URL}/cart/update.js", json={"updates": updates}, timeout=10)
-                log.info(f"[{email}] ⏱ 購物車已清空（{len(updates)} 項，{_time.perf_counter()-t1:.2f}s）")
-            else:
-                log.info(f"[{email}] ⏱ 購物車原本為空（{_time.perf_counter()-t1:.2f}s）")
+            r_clear = sess.post(f"{BASE_URL}/cart/clear.js", timeout=10)
+            log.info(f"[{email}] ⏱ 購物車已清空（{_time.perf_counter()-t1:.2f}s，HTTP {r_clear.status_code}）")
         except Exception as e:
             log.warning(f"[{email}] 購物車清空失敗：{e}")
 
