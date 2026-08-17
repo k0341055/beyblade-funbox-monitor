@@ -451,8 +451,8 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
             page = ctx.new_page()
 
             t1 = _time.perf_counter()
-            page.goto(cart_url, wait_until="domcontentloaded")
-            page.wait_for_timeout(4000)
+            page.goto(cart_url, wait_until="networkidle", timeout=15000)
+            page.wait_for_timeout(1500)
             log.info(f"[{email}] ⏱ 結帳頁載入（{_time.perf_counter()-t1:.2f}s）：{page.url}")
             if "/carts/" not in page.url:
                 log.error(f"[{email}] 結帳頁面異常（{page.url}），中止結帳")
