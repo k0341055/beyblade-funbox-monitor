@@ -41,7 +41,7 @@ flowchart TD
     COOL2 -->|新商品 / 到期| MAIL2["Gmail → 全體收件人"]
     NOCD --> MAIL3["Gmail → 全體收件人\n含一鍵結帳連結"]
 
-    COOL2 -->|同輪觸發| BUY["多帳號平行下單\nThreadPoolExecutor\n7-11 貨到付款"]
+    COOL2 -->|同輪觸發| BUY["多帳號平行下單\nThreadPoolExecutor\n逐件：清空購物車→加1件→立即結帳"]
     NOCD -->|同輪觸發\nguid 不在記憶體且未下單| ECART["建立獨立結帳 context（含 session）\n→ 登入 → 清空購物車\n→ 加入購物車"]
     NOCD -->|所有 guid 已在 order_state| SKIP["跳過下單\n不建立 session context\n不登入（避免異地衝突）"]
 
@@ -176,35 +176,35 @@ beyblade-funbox-monitor/
 ### 自動下單流程
 
 ```
-偵測到需通知的有庫存商品
+偵測到有庫存商品
   │
-  ├─ SKIP_KEYWORDS 商品（標題含 BX-33/BX-26/暴風天馬/銀牙烈虎/烈焰飛鳳）→ 靜默略過（不通知、不下單）
-  ├─ APP 限定商品（標題含 "APP"）→ 跳過自動下單（仍發通知）
+  ├─ SKIP_KEYWORDS 商品（標題含 "app"/"APP"）→ 完全靜默（不通知、不下單）
+  ├─ SKIP_BUY_KEYWORDS 商品（標題含 BX-33/BX-26/暴風天馬/銀牙烈虎/烈焰飛鳳）→ 發通知，跳過自動下單
   │
-  └─ 非 APP / 非 SKIP 商品 → 多帳號平行執行（ThreadPoolExecutor）
+  └─ 一般商品 → 多帳號平行執行（ThreadPoolExecutor）
         │
-        ├─ [帳號 1] requests 登入 → 全部商品加入購物車 → Playwright 結帳
+        ├─ [帳號 1] requests 登入，逐件商品依序執行：
+        │     ├─ POST /cart/clear.js（清空購物車）
+        │     ├─ POST /cart/add（加入 1 件，抽抽包/隨機強化組加 3 件）
+        │     └─ Playwright 開啟 /cart → 立即結帳
         ├─ [帳號 2] 同步並行執行
         └─ [帳號 3] 同步並行執行
               │
               └─ Playwright 結帳 SPA
                     ├─ 確認結帳頁為 /carts/{token}（session 驗證）
-                    ├─ 選擇 7-11 貨到付款（避免信用卡 3DS 卡單）
-                    ├─ 套用優惠券（若有可用，選第一張）
-                    ├─ 紅利點數重設為 0（避免自動折抵影響訂單）
+                    ├─ 選擇 7-11取貨(先付款)
                     ├─ 勾選所有同意條款 checkbox
                     └─ 點擊立即結帳（精確定位 btn-lg，排除頂部 nav 隱藏連結）
 ```
 
 ### 購買數量規則
 
-| 情況 | 數量決策 |
+| 情況 | 數量 |
 |---|---|
-| API `qc` 欄位有值 | `min(CART_QTY=3, 庫存, qc)` |
-| 標題含隨機強化組/抽抽包 | `min(3, 庫存)` |
-| 一般陀螺（保守） | `min(1, 庫存)` |
+| 標題含「隨機強化組」或「抽抽包」 | 3 件 |
+| 其他（一般陀螺） | 1 件 |
 
-> 加購失敗時自動降量至 1 重試；降量後仍失敗則跳過該件，繼續其他商品。
+> 每件商品獨立清空購物車後再加購，避免批次加購時售完商品卡住整筆訂單。
 
 ### 下單狀態去重
 
@@ -239,8 +239,8 @@ beyblade-funbox-monitor/
 
 ### Email 通知格式
 
-- **廣播信**（→ 全體 GMAIL_RECIPIENTS）：商品資訊 + 各帳號結帳摘要（含狀態、加入件數）
-- **個人信**（→ 各 Funbox 帳號）：該帳號每件商品加購狀態（✅ 加入 / ❌ 失敗 / — APP略過）+ 結帳結果
+- **廣播信**（→ 全體 GMAIL_RECIPIENTS）：商品資訊 + 各帳號逐件結帳狀態（帳號 × 商品 × 結帳結果）
+- **個人信**（→ 各 Funbox 帳號）：該帳號每件商品結帳結果（✅ 成功 / ⚠ 3DS / ❌ 付款失敗 / — 略過）；有 `3ds_pending`/`payment_failed` 時附上訂單補繳連結
 
 ---
 
