@@ -89,12 +89,14 @@ _CHECKOUT_LIMIT_TEXTS = ["最多只能購買", "達購買上限", "超過購買�
 # 結帳時商品已售完（庫存在加入購物車後被搶走，URL 不會變但頁面有提示文字）
 _CHECKOUT_STOCK_OUT_TEXTS = ["庫存不足", "數量不足", "已無庫存", "商品已售完", "無法結帳", "庫存已不足", "商品已下架", "out of stock"]
 
-# ── 略過通知與自動購買的商品關鍵字 ──────────────────
-# 商品名稱含以下任一關鍵字 → 整輪靜默略過（不通知、不下單）
-# APP 限定商品由 auto_buy_all 另行處理（仍會通知），故不需列於此
+# ── 完全靜默的商品關鍵字（不通知、不下單）──────────────
 SKIP_KEYWORDS: list[str] = [
     "app",
     "APP",
+]
+
+# ── 通知但不自動購買的商品關鍵字 ──────────────────────
+SKIP_BUY_KEYWORDS: list[str] = [
     "BX-33",
     "BX-26",
     "暴風天馬",
@@ -427,11 +429,13 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
                 br.close()
                 return "cart"
 
-            # 選擇 7-11 貨到付款
+            # 選擇 7-11 取貨（貨到付款或先付款均可）
             clicked_711 = False
             for sel in [
                 "button[id^='cvs-shipping-button']",
                 "button:has-text('7-11 貨到付款')",
+                "button:has-text('7-11取貨')",
+                "button:has-text('7-11')",
                 "[data-translate-keys='cod_names.seven']",
             ]:
                 try:
@@ -439,44 +443,13 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
                     if btn.count() > 0 and btn.is_visible():
                         btn.click()
                         page.wait_for_timeout(1000)
-                        log.info(f"[{email}] 已選擇 7-11 貨到付款")
+                        log.info(f"[{email}] 已選擇 7-11 取貨（{btn.inner_text()[:30].strip()}）")
                         clicked_711 = True
                         break
                 except Exception:
                     continue
             if not clicked_711:
                 log.warning(f"[{email}] 找不到 7-11 按鈕，繼續嘗試結帳")
-
-            # 套用優惠券（若有可用）
-            try:
-                coupon_open = page.locator("button.button-block:has-text('選擇優惠券或輸入優惠碼')").first
-                if coupon_open.count() > 0 and coupon_open.is_visible():
-                    coupon_open.click()
-                    page.wait_for_timeout(1500)
-                    # 選第一張可用的優惠券（force=True 跳過 modal 層遮擋）
-                    first_coupon = page.locator("[data-testid='checkable-radio']").first
-                    if first_coupon.count() > 0 and first_coupon.is_visible():
-                        first_coupon.click(force=True, timeout=5000)
-                        page.wait_for_timeout(500)
-                        confirm_btn = page.locator("button.confirm-btn").first
-                        if confirm_btn.count() > 0 and confirm_btn.is_visible():
-                            confirm_btn.click(force=True, timeout=5000)
-                            page.wait_for_timeout(1000)
-                            log.info(f"[{email}] 已套用優惠券")
-                        else:
-                            log.warning(f"[{email}] 找不到優惠券確認按鈕")
-                    else:
-                        log.info(f"[{email}] 無可用優惠券，關閉選單")
-                        page.keyboard.press("Escape")
-                        page.wait_for_timeout(500)
-            except Exception as e:
-                log.warning(f"[{email}] 優惠券套用例外：{e}")
-                # 確保 modal 關閉，不遮擋後續結帳按鈕
-                try:
-                    page.keyboard.press("Escape")
-                    page.wait_for_timeout(500)
-                except Exception:
-                    pass
 
             # 紅利點數重設為 0（避免自動折抵影響訂單金額）
             try:
@@ -605,9 +578,13 @@ def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
         log.warning("未設定任何 FUNBOX 帳號，跳過自動購買")
         return {}
 
-    non_app = [p for p in products if "APP" not in p["title"].upper()]
+    non_app = [
+        p for p in products
+        if "APP" not in p["title"].upper()
+        and not any(kw.upper() in p["title"].upper() for kw in SKIP_BUY_KEYWORDS)
+    ]
     if not non_app:
-        log.info("所有商品均為 APP 限定，略過自動購買")
+        log.info("所有商品均為 APP 限定或在 SKIP_BUY_KEYWORDS 中，略過自動購買")
         return {}
 
     if MAX_BUY_PRODUCTS > 0 and len(non_app) > MAX_BUY_PRODUCTS:
@@ -718,8 +695,8 @@ def _broadcast_email(products: list, account_results: dict = None) -> None:
         lines.append(f"API 限購：{'無限制' if cap is None else f'{cap} 件/筆'}")
         lines.append(f"實際加購：{get_target_qty(p)} 件/帳號")
         lines.append(f"商品連結：{p['url']}")
-        if "APP" in p["title"].upper():
-            lines.append("購買狀態：[APP 限定，已略過]")
+        if any(kw.upper() in p["title"].upper() for kw in SKIP_BUY_KEYWORDS):
+            lines.append("購買狀態：[略過自動購買]")
         lines.append("-" * 40)
 
     if account_results:
@@ -759,8 +736,8 @@ def _personal_checkout_email(acct_email: str, result: dict, products: list) -> N
     ]
 
     for p in products:
-        if "APP" in p["title"].upper():
-            status = "— APP 限定，已略過"
+        if any(kw.upper() in p["title"].upper() for kw in SKIP_BUY_KEYWORDS):
+            status = "— 略過自動購買"
         elif p["href"] in added:
             status = f"✅ 已加入購物車（x{get_target_qty(p)} 件）"
         elif p["href"] in attempted:
@@ -770,6 +747,14 @@ def _personal_checkout_email(acct_email: str, result: dict, products: list) -> N
         lines.append(f"▸ {p['title']}：{status}")
 
     lines += ["", f"完整商品頁：{COLLECTION_URL}"]
+
+    if checkout in ("3ds_pending", "payment_failed"):
+        lines += [
+            "",
+            "⚠ 訂單已建立但付款未完成，請盡快前往補繳，否則訂單將自動取消：",
+            f"  {BASE_URL}/account/orders",
+        ]
+
     _send_email([acct_email], subject, "\n".join(lines))
 
 
