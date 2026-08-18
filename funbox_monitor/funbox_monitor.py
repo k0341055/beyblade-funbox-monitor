@@ -827,7 +827,7 @@ def check_once() -> bool:
         ]
 
     
-        account_results = auto_buy_all(to_notify, purchased, attempts)
+        account_results = auto_buy_all(products, purchased, attempts)
         
         if to_notify or account_results:
             for acct_email, result in account_results.items():
