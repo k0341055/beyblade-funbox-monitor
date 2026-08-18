@@ -4,7 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       check_rounds:
-        description: '執行輪數（留空使用預設值 50，約 5 分鐘）'
+        description: '執行輪數（留空使用預設值 15，約 2 分鐘）'
+        required: false
+        default: ''
+      auto_checkout:
+        description: '自動下單（需先設定 AMAZON_1999_STORAGE_STATE_B64 secret）true / false'
         required: false
         default: ''
 
@@ -43,8 +47,7 @@ jobs:
       - name: Install Playwright Chromium
         run: python -m playwright install chromium --with-deps
 
-      # ── 跨 workflow 執行之狀態：seen_products.json ────────────────────────
-      # restore-keys 確保永遠能讀到最新的已見商品清單
+      # ── 通知冷卻狀態：seen_products.json ────────────────────────────────
       - name: Restore seen products state
         uses: actions/cache@v4
         with:
@@ -52,6 +55,36 @@ jobs:
           key: 1999-seen-${{ github.run_id }}
           restore-keys: |
             1999-seen-
+
+      # ── 下單狀態（防止重複下單）────────────────────────────────────────
+      - name: Restore order state
+        uses: actions/cache@v4
+        with:
+          path: 1999_monitor/1999_order_state.json
+          key: 1999-order-${{ github.run_id }}
+          restore-keys: |
+            1999-order-
+
+      # ── Amazon Pay Session（自動下單時需要）────────────────────────────
+      # 優先從 cache 讀取（較新），cache miss 時從 secret 解碼（備援）
+      - name: Restore Amazon Pay session from cache
+        uses: actions/cache@v4
+        id: session-cache
+        with:
+          path: 1999_monitor/1999_storage_state.json
+          key: 1999-session-${{ github.run_id }}
+          restore-keys: |
+            1999-session-
+
+      - name: Restore Amazon Pay session from secret (fallback)
+        if: steps.session-cache.outputs.cache-hit != 'true'
+        env:
+          AMAZON_1999_STORAGE_STATE_B64: ${{ secrets.AMAZON_1999_STORAGE_STATE_B64 }}
+        run: |
+          if [ -n "$AMAZON_1999_STORAGE_STATE_B64" ]; then
+            echo "$AMAZON_1999_STORAGE_STATE_B64" | base64 -d > 1999_monitor/1999_storage_state.json
+            echo "已從 secret 還原 Amazon Pay session"
+          fi
 
       - name: Run 1999 monitor
         env:
@@ -61,5 +94,10 @@ jobs:
           SEARCH_URL:        ${{ vars.SEARCH_URL_1999 }}
           CHECK_ROUNDS:      ${{ inputs.check_rounds || '15' }}
           STATE_FILE:        'seen_products.json'
+          AUTO_CHECKOUT:     ${{ inputs.auto_checkout || 'false' }}
+          ACCOUNT_1999:      ${{ secrets.ACCOUNT_1999 }}
+          PASSWORD_1999:     ${{ secrets.PASSWORD_1999 }}
+          STORAGE_STATE_FILE: '1999_storage_state.json'
+          ORDER_STATE_FILE:   '1999_order_state.json'
         working-directory: 1999_monitor
         run: python 1999_monitor.py

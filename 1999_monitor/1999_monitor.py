@@ -1,7 +1,8 @@
 """
-1999.co.jp 商品偵測 + Email 通知
+1999.co.jp 商品偵測 + Email 通知 + Amazon Pay 自動下單
 偵測到有庫存商品時，依 1 小時冷卻邏輯寄送 Email 給所有 GMAIL_RECIPIENTS。
-不自動下單（1999.co.jp 結帳需通過 reCAPTCHA，需人工完成）。
+AUTO_CHECKOUT=true 時：加入購物車 → Amazon Pay → /orderamazon 確認下單。
+Amazon Pay 需預先執行 generate_1999_session.py 儲存 browser session。
 """
 
 import asyncio
@@ -62,6 +63,13 @@ SKIP_KEYWORDS: list[str] = [
     "BX-43",
     "BX-25",
 ]
+
+# ── 自動下單設定 ──────────────────────────────────────
+AUTO_CHECKOUT = os.environ.get("AUTO_CHECKOUT", "false").lower() == "true"
+ACCOUNT_1999 = os.environ.get("ACCOUNT_1999", "").strip()
+PASSWORD_1999 = os.environ.get("PASSWORD_1999", "").strip()
+STORAGE_STATE_FILE = Path(os.environ.get("STORAGE_STATE_FILE", "1999_storage_state.json"))
+ORDER_STATE_FILE = Path(os.environ.get("ORDER_STATE_FILE", "1999_order_state.json"))
 
 # ─────────────────────────────────────────────
 # 隨機 UA / Viewport（反 Cloudflare 指紋）
@@ -172,6 +180,24 @@ def _parse_ts(ts_str: str) -> datetime:
     return dt
 
 
+def load_order_state() -> dict:
+    """回傳 {href: ISO時間戳}，記錄已成功下單的商品（防止重複下單）。"""
+    if ORDER_STATE_FILE.exists():
+        return json.loads(ORDER_STATE_FILE.read_text(encoding="utf-8")).get("purchased", {})
+    return {}
+
+
+def save_order_state(purchased: dict):
+    ORDER_STATE_FILE.write_text(
+        json.dumps(
+            {"purchased": purchased, "updated": datetime.now(TW_TZ).isoformat()},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 # ─────────────────────────────────────────────
 # 擷取商品清單（Playwright）
 # ─────────────────────────────────────────────
@@ -260,8 +286,8 @@ def _send_email(to: list, subject: str, body: str):
         log.error(f"Email 發送失敗：{e}")
 
 
-def send_notify_email(products: list):
-    """寄送商品有庫存通知，含購買連結。"""
+def send_notify_email(products: list, checkout_results: dict = None):
+    """寄送商品有庫存通知，含購買連結；有自動下單結果時一併附上。"""
     count = len(products)
     subject = f"【1999 {NOTIFY_KEYWORD} 補貨！】偵測到 {count} 件商品"
     now_str = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -284,14 +310,185 @@ def send_notify_email(products: list):
         lines.append(f"商品連結：{p['url']}")
         lines.append("-" * 40)
 
-    lines += [
-        "",
-        "─ 點擊下方連結前往購物車結帳 ─",
-        f"🛒 {CHECKOUT_URL}",
-        "",
-        f"完整搜尋頁：{SEARCH_URL}",
-    ]
+    if checkout_results:
+        lines += ["", "=" * 50, "自動下單結果", "=" * 50]
+        for href, status in checkout_results.items():
+            p_obj = next((p for p in products if p["href"] == href), None)
+            title = p_obj["title"] if p_obj else href
+            label = _CHECKOUT_LABEL_1999.get(status, status)
+            lines.append(f"▸ {title}：{label}")
+        if any(s == "amazon_auth_needed" for s in checkout_results.values()):
+            lines += [
+                "",
+                "⚠ Amazon Pay session 已過期，請重新授權：",
+                "  1. 在本機執行：python generate_1999_session.py",
+                "  2. 完成後更新 GitHub Secret：AMAZON_1999_STORAGE_STATE_B64",
+            ]
+    else:
+        lines += [
+            "",
+            "─ 點擊下方連結前往購物車結帳 ─",
+            f"  {CHECKOUT_URL}",
+        ]
+
+    lines += ["", f"完整搜尋頁：{SEARCH_URL}"]
     _send_email(GMAIL_RECIPIENTS, subject, "\n".join(lines))
+
+
+# ─────────────────────────────────────────────
+# 自動下單（Amazon Pay）
+# ─────────────────────────────────────────────
+
+# 加入購物車按鈕的多種候選 selector（從最具體到最寬鬆）
+_CART_BTN_SELECTORS = [
+    "input[value='カートに入れる']",
+    "input[value*='カートに入れ']",
+    "input[value*='カートへ']",
+    "input[type='button'][name*='CartAdd']",
+    "input[type='button'][name*='btnCart']",
+    "input.c-button-em[value*='カート']",
+    "a.c-button-em:has-text('カート')",
+    "button:has-text('カートに入れる')",
+]
+
+_CHECKOUT_LABEL_1999 = {
+    "success":            "✅ 已自動下單完成",
+    "amazon_auth_needed": "⚠ Amazon Pay session 過期，需重新授權",
+    "cart_not_found":     "❌ 找不到加入購物車按鈕（已售完或頁面異常）",
+    "no_amazon_pay":      "❌ 找不到 Amazon Pay 按鈕",
+    "no_confirm_button":  "❌ 找不到確認下單按鈕",
+    "login_failed":       "❌ 1999 登入失敗，請確認帳號密碼",
+    "failed":             "❌ 下單失敗（未知錯誤）",
+}
+
+
+async def _login_1999(page) -> bool:
+    """以帳號密碼登入 1999.co.jp，回傳是否成功。"""
+    if not ACCOUNT_1999 or not PASSWORD_1999:
+        log.warning("[1999] 未設定 ACCOUNT_1999/PASSWORD_1999，無法自動登入")
+        return False
+    try:
+        await page.goto(f"{BASE_URL}/login", wait_until="domcontentloaded", timeout=15_000)
+        await page.wait_for_timeout(_jitter(800))
+        await page.fill("input[name='txtLogin']", ACCOUNT_1999)
+        await page.fill("input[name='Usr_Ps']", PASSWORD_1999)
+        cb = page.locator("input[name='cbAutoLogin']")
+        if cb.count() > 0 and not await cb.is_checked():
+            await cb.check()
+        await page.click("input[name='btnLogin']")
+        await page.wait_for_url(f"{BASE_URL}/", timeout=15_000)
+        log.info(f"[1999] 登入成功：{_mask_email(ACCOUNT_1999)}")
+        return True
+    except Exception as e:
+        log.error(f"[1999] 登入失敗：{e}")
+        return False
+
+
+async def _auto_checkout_product(page, product: dict) -> str:
+    """
+    單件商品完整下單流程（Amazon Pay）：
+    1. 商品頁 → 確認已登入 → 加入購物車
+    2. GET /order → 點擊 Amazon Pay 按鈕
+    3. 等待 OAuth 重導至 /orderamazon
+    4. 點擊「我同意並下單。」→ 偵測成功文字
+
+    回傳："success" | "amazon_auth_needed" | "cart_not_found" |
+           "no_amazon_pay" | "no_confirm_button" | "login_failed" | "failed"
+    """
+    import time as _t
+    t0 = _t.perf_counter()
+    title = product["title"]
+
+    try:
+        # ── Step 1：商品頁 ─────────────────────────────────────────────
+        log.info(f"[1999結帳] 開始：{title}")
+        await page.goto(product["url"], wait_until="networkidle", timeout=30_000)
+        await _wait_cf(page)
+        await page.wait_for_timeout(_jitter(800))
+
+        if "login" in page.url.lower():
+            log.info("[1999結帳] session 已過期，嘗試重新登入...")
+            if not await _login_1999(page):
+                return "login_failed"
+            await page.goto(product["url"], wait_until="networkidle", timeout=30_000)
+
+        # ── Step 2：加入購物車 ─────────────────────────────────────────
+        cart_clicked = False
+        for sel in _CART_BTN_SELECTORS:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0 and await loc.is_visible():
+                    await loc.click()
+                    cart_clicked = True
+                    log.info(f"[1999結帳] ⏱ 加入購物車（{_t.perf_counter()-t0:.2f}s）：{title}")
+                    break
+            except Exception:
+                continue
+
+        if not cart_clicked:
+            log.warning(f"[1999結帳] 找不到加入購物車按鈕：{title}")
+            return "cart_not_found"
+
+        await page.wait_for_timeout(_jitter(1200))
+
+        # ── Step 3：前往 /order ────────────────────────────────────────
+        await page.goto(CHECKOUT_URL, wait_until="networkidle", timeout=30_000)
+        if "login" in page.url.lower():
+            if not await _login_1999(page):
+                return "login_failed"
+            await page.goto(CHECKOUT_URL, wait_until="networkidle", timeout=30_000)
+
+        log.info(f"[1999結帳] ⏱ /order 載入（{_t.perf_counter()-t0:.2f}s）")
+
+        # ── Step 4：Amazon Pay 按鈕 ────────────────────────────────────
+        apay = page.locator(".amazonpay-button-view1, .amazonpay-button-logo").first
+        if apay.count() == 0 or not await apay.is_visible():
+            log.warning("[1999結帳] 找不到 Amazon Pay 按鈕")
+            return "no_amazon_pay"
+
+        await apay.click()
+        log.info("[1999結帳] Amazon Pay 已點擊，等待 OAuth 重導...")
+
+        # ── Step 5：等待跳回 /orderamazon ─────────────────────────────
+        try:
+            await page.wait_for_url(f"{BASE_URL}/orderamazon*", timeout=45_000)
+        except PlaywrightTimeoutError:
+            cur = page.url
+            if any(k in cur for k in ("amazon.co.jp", "payments.amazon", "amazon.com")):
+                log.warning(f"[1999結帳] Amazon Pay 需要重新授權，停在：{cur}")
+                return "amazon_auth_needed"
+            log.warning(f"[1999結帳] 等待 /orderamazon 超時（{_t.perf_counter()-t0:.2f}s），停在：{cur}")
+            return "failed"
+
+        await page.wait_for_load_state("networkidle")
+        log.info(f"[1999結帳] ⏱ /orderamazon 載入（{_t.perf_counter()-t0:.2f}s）")
+
+        # ── Step 6：確認下單 ───────────────────────────────────────────
+        confirm = page.locator("#btnSendRight, input[name*='btnSendRight']").first
+        if confirm.count() == 0 or not await confirm.is_visible():
+            log.warning("[1999結帳] 找不到確認下單按鈕")
+            return "no_confirm_button"
+
+        await confirm.click()
+        await page.wait_for_timeout(3000)
+
+        # ── Step 7：成功偵測 ───────────────────────────────────────────
+        body = ""
+        try:
+            body = await page.locator("body").inner_text(timeout=5000)
+        except Exception:
+            pass
+
+        if "採購訂單（已完成）" in body or "ご注文ありがとう" in body:
+            log.info(f"[1999結帳] ✅ 下單成功（{_t.perf_counter()-t0:.2f}s）：{title}")
+            return "success"
+
+        log.warning(f"[1999結帳] 結果不明：{page.url} | body[:80]={body[:80]}")
+        return "failed"
+
+    except Exception as e:
+        log.error(f"[1999結帳] 例外：{e}", exc_info=True)
+        return "failed"
 
 
 # ─────────────────────────────────────────────
@@ -299,7 +496,7 @@ def send_notify_email(products: list):
 # ─────────────────────────────────────────────
 
 
-async def check_once(page) -> bool:
+async def check_once(page, context=None) -> bool:
     try:
         products = await fetch_products(page)
 
@@ -336,11 +533,34 @@ async def check_once(page) -> bool:
         ]
 
         if to_notify:
+            checkout_results: dict = {}
+
+            if AUTO_CHECKOUT:
+                purchased = load_order_state()
+                to_checkout = [p for p in to_notify if p["href"] not in purchased]
+                if not to_checkout:
+                    log.info("所有可通知商品均已下單過，跳過下單")
+                else:
+                    log.info(f"自動下單：{len(to_checkout)} 件商品")
+                    for p in to_checkout:
+                        status = await _auto_checkout_product(page, p)
+                        checkout_results[p["href"]] = status
+                        if status == "success":
+                            purchased[p["href"]] = now.isoformat()
+                    save_order_state(purchased)
+                    # 更新 Amazon session（讓 cookie 保持新鮮）
+                    if context:
+                        try:
+                            await context.storage_state(path=str(STORAGE_STATE_FILE))
+                            log.info(f"Amazon session 已更新：{STORAGE_STATE_FILE}")
+                        except Exception as e:
+                            log.warning(f"儲存 session 失敗：{e}")
+
             log.info(
                 f"發送通知：{len(to_notify)} 件"
                 f"（共 {len(products)} 件，跳過 {len(products)-len(to_notify)} 件冷卻中）"
             )
-            send_notify_email(to_notify)
+            send_notify_email(to_notify, checkout_results or None)
             for p in to_notify:
                 notified[p["href"]] = now.isoformat()
         else:
@@ -360,11 +580,22 @@ async def check_once(page) -> bool:
 
 
 async def main():
-    log.info(f"1999 監控器 | 關鍵字：{NOTIFY_KEYWORD} | 輪數：{CHECK_ROUNDS}")
+    log.info(
+        f"1999 監控器 | 關鍵字：{NOTIFY_KEYWORD} | 輪數：{CHECK_ROUNDS}"
+        + (" | 自動下單：開啟" if AUTO_CHECKOUT else "")
+    )
 
     ua       = _random_ua()
     viewport = _random_viewport()
     log.info(f"UA: ...{ua[-50:]} | {viewport['width']}x{viewport['height']}")
+
+    # 若開啟自動下單，載入預存的 Amazon Pay session
+    storage_state = None
+    if AUTO_CHECKOUT and STORAGE_STATE_FILE.exists():
+        storage_state = str(STORAGE_STATE_FILE)
+        log.info(f"載入 Amazon Pay session：{STORAGE_STATE_FILE}")
+    elif AUTO_CHECKOUT:
+        log.warning(f"找不到 {STORAGE_STATE_FILE}，Amazon Pay 可能無法自動完成授權")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -377,6 +608,7 @@ async def main():
             viewport=viewport,
             locale="ja-JP",
             timezone_id="Asia/Tokyo",
+            storage_state=storage_state,
             extra_http_headers={
                 "Accept-Language": "ja-JP,ja;q=0.9,zh-TW;q=0.8,en;q=0.7",
                 "Sec-Fetch-Dest": "document",
@@ -391,10 +623,22 @@ async def main():
         )
         page = await context.new_page()
 
+        # 若開啟自動下單，先確認 1999 已登入；若 session 過期則用帳密重登
+        if AUTO_CHECKOUT:
+            try:
+                await page.goto(f"{BASE_URL}/mypage", wait_until="domcontentloaded", timeout=15_000)
+                if "login" in page.url.lower():
+                    log.info("1999 session 已過期，嘗試使用帳號密碼登入...")
+                    await _login_1999(page)
+                else:
+                    log.info("1999 session 有效，已登入")
+            except Exception as e:
+                log.warning(f"登入確認失敗：{e}")
+
         for round_num in range(1, CHECK_ROUNDS + 1):
             if CHECK_ROUNDS > 1:
                 log.info(f"── 第 {round_num}/{CHECK_ROUNDS} 輪 ──")
-            await check_once(page)
+            await check_once(page, context)
             if round_num < CHECK_ROUNDS:
                 wait = random.randint(5, 8)
                 log.info(f"等待 {wait} 秒後進行下一輪...")
