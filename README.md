@@ -41,7 +41,7 @@ flowchart TD
     COOL2 -->|新商品 / 到期| MAIL2["Gmail → 全體收件人"]
     NOCD --> MAIL3["Gmail → 全體收件人\n含一鍵結帳連結"]
 
-    COOL2 -->|同輪觸發| BUY["多帳號平行下單\nThreadPoolExecutor\n逐件：清空購物車→加1件→立即結帳"]
+    COOL2 -->|同輪觸發| BUY["多帳號下單\nCHECKOUT_MODE 決定策略\nsequential / parallel"]
     NOCD -->|同輪觸發\nguid 不在記憶體且未下單| ECART["建立獨立結帳 context（含 session）\n→ 登入 → 清空購物車\n→ 加入購物車"]
     NOCD -->|所有 guid 已在 order_state| SKIP["跳過下單\n不建立 session context\n不登入（避免異地衝突）"]
 
@@ -179,18 +179,22 @@ beyblade-funbox-monitor/
 偵測到有庫存商品
   │
   ├─ SKIP_KEYWORDS 商品（標題含 "app"/"APP"）→ 完全靜默（不通知、不下單）
-  ├─ SKIP_BUY_KEYWORDS 商品（標題含 BX-33/BX-26/暴風天馬/銀牙烈虎/烈焰飛鳳）→ 發通知，跳過自動下單
+  ├─ SKIP_BUY_KEYWORDS 商品（標題含 BX-33/BX-26/BXG-33/BXG-29/蜘蛛人/暴風天馬/銀牙烈虎/烈焰飛鳳）
+  │     → 發通知，跳過自動下單
   │
-  └─ 一般商品 → 多帳號平行執行（ThreadPoolExecutor）
+  └─ 一般商品 → 依 CHECKOUT_MODE 決定策略（YML 參數控制）
         │
-        ├─ [帳號 1] requests 登入，逐件商品依序執行：
+        ├─ [sequential 模式，預設] 帳號間平行，每帳號登入一次後逐件商品依序執行：
+        │     ├─ 商品排序：PRIORITY_KEYWORDS 最優先 → 購買次數少的優先（自然輪替）
         │     ├─ POST /cart/clear.js（清空購物車）
         │     ├─ POST /cart/add（加入 1 件，抽抽包/隨機強化組加 3 件）
         │     └─ Playwright 開啟 /cart → 立即結帳
-        ├─ [帳號 2] 同步並行執行
-        └─ [帳號 3] 同步並行執行
+        │
+        └─ [parallel 模式] 每個（帳號 × 商品）各自獨立 thread 登入後立即結帳
+              ├─ 商品排序同 sequential（PRIORITY 優先 → 購買次數少優先）
+              └─ 最大並發數：PARALLEL_CHECKOUT_LIMIT（預設 6，避免被限流）
               │
-              └─ Playwright 結帳 SPA
+              └─ Playwright 結帳 SPA（兩個模式共用）
                     ├─ 確認結帳頁為 /carts/{token}（session 驗證）
                     ├─ 選擇 7-11取貨(先付款)
                     ├─ 勾選所有同意條款 checkbox
@@ -206,15 +210,25 @@ beyblade-funbox-monitor/
 
 > 每件商品獨立清空購物車後再加購，避免批次加購時售完商品卡住整筆訂單。
 
+### 商品排序與購買輪替
+
+每輪下單前，程式依以下規則決定每個帳號的購買順序：
+
+1. **PRIORITY_KEYWORDS**（程式碼設定）：符合關鍵字的商品永遠排最前面，不管已購幾次
+2. **購買次數少優先**：`purchased[href][email]` 計數越低的商品越先買，確保每件商品都有機會被買到
+3. **連續失敗 ≥ 10 次**：自動跳過該（帳號 × 商品）組合，成功後歸零重計
+
 ### 下單狀態去重
 
 `seen_products.json` 同時記錄三個 key：
 
-| Key | 說明 | 去重規則 |
+| Key | 格式 | 規則 |
 |---|---|---|
-| `notified` | 上次通知時間 | 1 小時冷卻 |
-| `purchased` | `{href: [成功帳號清單]}` | 已購買的帳號跳過 |
-| `attempts` | `{href: {帳號: 失敗次數}}` | 失敗 ≥ 2 次跳過 |
+| `notified` | `{href: ISO時間戳}` | 1 小時通知冷卻 |
+| `purchased` | `{href: {帳號: 購買次數}}` | 不跳過，作為排序依據（次數少的優先） |
+| `attempts` | `{href: {帳號: 連續失敗次數}}` | 連續失敗 ≥ 10 次才跳過；購買成功後歸零 |
+
+> 舊版 `purchased` 格式（`{href: [帳號清單]}`）在讀取時自動遷移為新格式。
 
 ### 結帳狀態判斷
 
