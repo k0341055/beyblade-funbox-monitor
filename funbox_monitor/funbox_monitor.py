@@ -1,8 +1,8 @@
 """
 shop.funbox.com.tw 商品偵測器
 - 偵測：Cyberbiz /products.json API，每輪 < 1 秒
-- 下單：多帳號平行執行，每件商品加 3 個入購物車，全部加完後一次結帳
-- 付款：7-11 貨到付款（避免信用卡 3DS 卡單）
+- 下單：多帳號平行執行，每件商品獨立清空購物車後立即結帳
+- 模式：sequential（帳號平行、商品逐件）或 parallel（帳號×商品全平行）
 """
 
 import json
@@ -107,6 +107,20 @@ SKIP_BUY_KEYWORDS: list[str] = [
     "烈焰飛鳳",
 ]
 
+# ── 優先購買的商品關鍵字（無視購買次數，永遠排在最前面）──
+# 在此填入最想優先買到的商品關鍵字，例如："BX-01", "蒼王龍"
+_env_priority = os.environ.get("PRIORITY_KEYWORDS", "").strip()
+PRIORITY_KEYWORDS: list[str] = (
+    [kw.strip() for kw in _env_priority.split(",") if kw.strip()]
+    if _env_priority else []
+)
+
+# ── 購買模式 ────────────────────────────────────────────────
+# 'sequential'：帳號平行，每帳號登入一次後逐件商品依序結帳（節省登入次數）
+# 'parallel'  ：每個（帳號 × 商品）各自獨立 thread 登入後立即結帳（最大化速度）
+CHECKOUT_MODE = os.environ.get("CHECKOUT_MODE", "sequential").strip().lower()
+PARALLEL_CHECKOUT_LIMIT = int(os.environ.get("PARALLEL_CHECKOUT_LIMIT", "6"))
+
 
 def is_random_product(p: dict) -> bool:
     """隨機強化組 / 抽抽包類商品，每輪都嘗試購買（限購較寬，通常 3 個）。"""
@@ -152,17 +166,20 @@ def _extract_csrf(html: str) -> str:
 def load_state() -> tuple:
     """
     回傳 (notified, purchased, attempts)。
-    notified:  {href: ISO時間戳}              ← 1 小時通知冷卻
-    purchased: {href: [帳號email清單]}        ← 已成功結帳
-    attempts:  {href: {帳號email: 次數}}      ← 失敗嘗試次數（≥2 則不再試）
+    notified:  {href: ISO時間戳}                  ← 1 小時通知冷卻
+    purchased: {href: {帳號email: 購買次數}}      ← 購買次數（用於輪替排序，購買最少的優先）
+    attempts:  {href: {帳號email: 連續失敗次數}}  ← 連續失敗 ≥10 次才跳過
     """
     if STATE_FILE.exists():
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        return (
-            data.get("notified", {}),
-            data.get("purchased", {}),
-            data.get("attempts", {}),
-        )
+        notified = data.get("notified", {})
+        purchased = data.get("purchased", {})
+        attempts = data.get("attempts", {})
+        # 遷移舊格式：purchased 值若為 list → 轉為 {email: 1}
+        for href, val in list(purchased.items()):
+            if isinstance(val, list):
+                purchased[href] = {email: 1 for email in val}
+        return notified, purchased, attempts
     return {}, {}, {}
 
 
@@ -554,26 +571,125 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
 
 
 # ─────────────────────────────────────────────
-# 單一帳號完整流程
+# 商品排序輔助
 # ─────────────────────────────────────────────
 
 
+def _sort_products_for_account(products: list, purchased: dict, attempts: dict, email: str) -> list:
+    """
+    為指定帳號篩選並排序商品：
+    1. 過濾掉連續失敗 ≥10 次的（帳號 × 商品）組合
+    2. PRIORITY_KEYWORDS 商品永遠排最前面（不管已購幾次）
+    3. 同優先級內，購買次數越少的排越前（自然輪替，確保每件都有機會被買到）
+    """
+    eligible = [
+        p for p in products
+        if attempts.get(p["href"], {}).get(email, 0) < 10
+    ]
+
+    def _sort_key(p):
+        is_priority = bool(PRIORITY_KEYWORDS) and any(
+            kw.upper() in p["title"].upper() for kw in PRIORITY_KEYWORDS
+        )
+        buy_count = purchased.get(p["href"], {}).get(email, 0)
+        return (0 if is_priority else 1, buy_count)
+
+    return sorted(eligible, key=_sort_key)
+
+
 # ─────────────────────────────────────────────
-# 多帳號平行執行
+# 多帳號下單策略
 # ─────────────────────────────────────────────
+
+
+def _auto_buy_sequential(non_app: list, purchased: dict, attempts: dict) -> dict:
+    """
+    Sequential 模式（預設）：帳號間平行，每帳號登入一次後逐件商品依序結帳。
+    節省登入次數，適合商品數量少的情境。
+    """
+    results = {}
+    if len(FUNBOX_ACCOUNTS) == 1:
+        email, pwd = FUNBOX_ACCOUNTS[0]
+        acct_products = _sort_products_for_account(non_app, purchased, attempts, email)
+        if acct_products:
+            results[email] = _checkout_for_account(email, pwd, acct_products)
+        else:
+            log.info(f"[{email}] 本輪無待購商品，跳過")
+    else:
+        with ThreadPoolExecutor(max_workers=len(FUNBOX_ACCOUNTS)) as executor:
+            futures = {}
+            for email, pwd in FUNBOX_ACCOUNTS:
+                acct_products = _sort_products_for_account(non_app, purchased, attempts, email)
+                if acct_products:
+                    futures[executor.submit(_checkout_for_account, email, pwd, acct_products)] = email
+                else:
+                    log.info(f"[{email}] 本輪無待購商品，跳過")
+            for future in as_completed(futures):
+                email = futures[future]
+                try:
+                    results[email] = future.result()
+                except Exception as e:
+                    log.error(f"[{email}] 執行緒例外：{e}")
+                    results[email] = {"added": [], "attempted": [], "checkout": {}}
+    return results
+
+
+def _auto_buy_parallel(non_app: list, purchased: dict, attempts: dict) -> dict:
+    """
+    Parallel 模式：每個（帳號 × 商品）為獨立 thread，各自登入後立即結帳。
+    最大並發數由 PARALLEL_CHECKOUT_LIMIT 控制（預設 6），避免記憶體爆炸或被網站限流。
+    """
+    tasks = []
+    for email, pwd in FUNBOX_ACCOUNTS:
+        sorted_products = _sort_products_for_account(non_app, purchased, attempts, email)
+        for p in sorted_products:
+            tasks.append((email, pwd, p))
+
+    if not tasks:
+        log.info("平行模式：無待執行任務")
+        return {}
+
+    log.info(
+        f"平行模式：{len(tasks)} 個任務（{len(FUNBOX_ACCOUNTS)} 帳號 × {len(non_app)} 件商品），"
+        f"並發上限 {PARALLEL_CHECKOUT_LIMIT}"
+    )
+
+    results: dict = {}
+
+    with ThreadPoolExecutor(max_workers=PARALLEL_CHECKOUT_LIMIT) as executor:
+        futures = {
+            executor.submit(_checkout_for_account, email, pwd, [p]): (email, p["href"])
+            for email, pwd, p in tasks
+        }
+        for future in as_completed(futures):
+            email, href = futures[future]
+            try:
+                r = future.result()
+                if email not in results:
+                    results[email] = {"added": [], "attempted": [], "checkout": {}}
+                results[email]["added"].extend(r.get("added", []))
+                results[email]["attempted"].extend(r.get("attempted", []))
+                results[email]["checkout"].update(r.get("checkout", {}))
+            except Exception as e:
+                log.error(f"[{email}] 執行緒例外：{e}")
+                if email not in results:
+                    results[email] = {"added": [], "attempted": [], "checkout": {}}
+                results[email]["checkout"][href] = "failed"
+
+    return results
 
 
 def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
     """
-    對所有非 APP 商品，以每個帳號平行下單。
+    對所有可購買商品，依 CHECKOUT_MODE 決定下單策略：
+      'sequential'：帳號平行，每帳號登入一次後逐件商品依序結帳（節省登入次數）
+      'parallel'  ：每個（帳號 × 商品）獨立 thread（最大化速度，各自獨立登入）
 
-    purchased: {href: [已成功購買的帳號 email 清單]}
-    attempts:  {href: {帳號email: 失敗次數}}
-    - 已成功購買過 → 跳過
-    - 失敗嘗試 ≥ 10 次 → 跳過（第11次看到同一商品不再浪費時間）
-    - 其餘 → 嘗試下單
+    purchased: {href: {帳號email: 購買次數}} — 購買越少的商品越優先
+    attempts:  {href: {帳號email: 連續失敗次數}} — 連續失敗 ≥10 次才跳過
+    PRIORITY_KEYWORDS 商品永遠最優先，不管購買次數。
 
-    回傳 {email: {"added": [...hrefs...], "attempted": [...], "checkout": status}}
+    回傳 {email: {"added": [...hrefs], "attempted": [...hrefs], "checkout": {href: status}}}
     """
     if not FUNBOX_ACCOUNTS:
         log.warning("未設定任何 FUNBOX 帳號，跳過自動購買")
@@ -592,50 +708,11 @@ def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
         log.info(f"MAX_BUY_PRODUCTS={MAX_BUY_PRODUCTS}，僅購買前 {MAX_BUY_PRODUCTS} 件")
         non_app = non_app[:MAX_BUY_PRODUCTS]
 
-    def _products_for_account(email: str) -> list:
-        """
-        已成功購買 → 跳過；失敗嘗試 ≥ 10 → 跳過；其餘都試。
-        一般款與隨機包邏輯相同（第一次成功後就不再重複，失敗兩次後放棄）。
-        """
-        result = []
-        for p in non_app:
-            href = p["href"]
-            #if email in purchased.get(href, []):
-              #  log.info(f"[{email}] 已成功購買，跳過：{p['title']}")
-                #continue
-            if attempts.get(href, {}).get(email, 0) >= 10:
-                log.info(f"[{email}] 已嘗試 10 次失敗，跳過：{p['title']}")
-                continue
-            result.append(p)
-        return result
+    log.info(f"自動購買啟動（{CHECKOUT_MODE} 模式）：{len(non_app)} 件商品 × {len(FUNBOX_ACCOUNTS)} 組帳號")
 
-    log.info(f"自動購買啟動：{len(non_app)} 件商品 × {len(FUNBOX_ACCOUNTS)} 組帳號")
-
-    results = {}
-    if len(FUNBOX_ACCOUNTS) == 1:
-        email, pwd = FUNBOX_ACCOUNTS[0]
-        acct_products = _products_for_account(email)
-        if acct_products:
-            results[email] = _checkout_for_account(email, pwd, acct_products)
-        else:
-            log.info(f"[{email}] 本輪無需購買的商品，跳過")
-    else:
-        with ThreadPoolExecutor(max_workers=len(FUNBOX_ACCOUNTS)) as executor:
-            futures = {}
-            for email, pwd in FUNBOX_ACCOUNTS:
-                acct_products = _products_for_account(email)
-                if acct_products:
-                    futures[executor.submit(_checkout_for_account, email, pwd, acct_products)] = email
-                else:
-                    log.info(f"[{email}] 本輪無需購買的商品，跳過")
-            for future in as_completed(futures):
-                email = futures[future]
-                try:
-                    results[email] = future.result()
-                except Exception as e:
-                    log.error(f"[{email}] 執行緒例外：{e}")
-                    results[email] = {"added": [], "attempted": [], "checkout": "failed"}
-    return results
+    if CHECKOUT_MODE == "parallel":
+        return _auto_buy_parallel(non_app, purchased, attempts)
+    return _auto_buy_sequential(non_app, purchased, attempts)
 
 
 # ─────────────────────────────────────────────
@@ -837,20 +914,22 @@ def check_once() -> bool:
                 checkout = result.get("checkout", {})
                 for href, status in checkout.items():
                     if status == "success":
-                        purchased.setdefault(href, [])
-                        if acct_email not in purchased[href]:
-                            purchased[href].append(acct_email)
-                            # ── 新增：成功後重置失敗計數器 ──
-                            if href in attempts and acct_email in attempts.get(href, {}):
-                                attempts[href][acct_email] = 0
-                                log.info(f"[{acct_email}] 購買成功，重置失敗計數器：{href}")
-                            p_obj = next((x for x in to_notify if x["href"] == href), None)
-                            log.info(f"已記錄購買成功：{acct_email} → {p_obj['title'] if p_obj else href}")
+                        purchased.setdefault(href, {})
+                        old_count = purchased[href].get(acct_email, 0)
+                        purchased[href][acct_email] = old_count + 1
+                        p_obj = next((x for x in to_notify if x["href"] == href), None)
+                        log.info(
+                            f"已記錄購買成功（第{old_count + 1}次）：{acct_email} → "
+                            f"{p_obj['title'] if p_obj else href}"
+                        )
+                        # 成功後重置連續失敗計數器，避免歷史失敗次數跨輪累積封鎖帳號
+                        if acct_email in attempts.get(href, {}):
+                            attempts[href][acct_email] = 0
+                            log.info(f"[{acct_email}] 購買成功，重置連續失敗計數器：{href}")
                     else:
-                        if acct_email not in purchased.get(href, []):
-                            attempts.setdefault(href, {})
-                            attempts[href][acct_email] = attempts[href].get(acct_email, 0) + 1
-                            log.info(f"[{acct_email}] 記錄失敗嘗試 #{attempts[href][acct_email]}：{href}")
+                        attempts.setdefault(href, {})
+                        attempts[href][acct_email] = attempts[href].get(acct_email, 0) + 1
+                        log.info(f"[{acct_email}] 記錄失敗嘗試 #{attempts[href][acct_email]}：{href}")
 
             log.info(
                 f"發送通知：{len(to_notify)} 件"

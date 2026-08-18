@@ -7,6 +7,10 @@ on:
         description: '執行輪數（留空使用預設值 60，約 5 分鐘）'
         required: false
         default: ''
+      checkout_mode:
+        description: '購買模式：sequential（帳號平行、商品逐件，預設）或 parallel（帳號×商品全平行）'
+        required: false
+        default: ''
 
 jobs:
   monitor:
@@ -70,8 +74,10 @@ jobs:
           FUNBOX_PASSWORD_2: ${{ secrets.FUNBOX_PASSWORD_2 }}
           FUNBOX_EMAIL_3:    ${{ secrets.FUNBOX_EMAIL_3 }}
           FUNBOX_PASSWORD_3: ${{ secrets.FUNBOX_PASSWORD_3 }}
-          SEARCH_URL:        ${{ vars.FUNBOX_SEARCH_URL }}
-          CHECK_ROUNDS:      ${{ inputs.check_rounds || '60' }}
-          STATE_FILE:        'seen_products.json'
+          SEARCH_URL:              ${{ vars.FUNBOX_SEARCH_URL }}
+          CHECK_ROUNDS:            ${{ inputs.check_rounds || '60' }}
+          CHECKOUT_MODE:           ${{ inputs.checkout_mode || 'sequential' }}
+          PARALLEL_CHECKOUT_LIMIT: '6'
+          STATE_FILE:              'seen_products.json'
         working-directory: funbox_monitor
         run: python funbox_monitor.py
