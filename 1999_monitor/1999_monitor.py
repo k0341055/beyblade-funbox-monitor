@@ -286,8 +286,8 @@ def _send_email(to: list, subject: str, body: str):
         log.error(f"Email 發送失敗：{e}")
 
 
-def send_notify_email(products: list, checkout_results: dict = None):
-    """寄送商品有庫存通知，含購買連結；有自動下單結果時一併附上。"""
+def send_notify_email(products: list):
+    """廣播通知：寄給全體 GMAIL_RECIPIENTS，僅含商品資訊與結帳連結，不含下單結果。"""
     count = len(products)
     subject = f"【1999 {NOTIFY_KEYWORD} 補貨！】偵測到 {count} 件商品"
     now_str = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -310,29 +310,61 @@ def send_notify_email(products: list, checkout_results: dict = None):
         lines.append(f"商品連結：{p['url']}")
         lines.append("-" * 40)
 
-    if checkout_results:
-        lines += ["", "=" * 50, "自動下單結果", "=" * 50]
-        for href, status in checkout_results.items():
-            p_obj = next((p for p in products if p["href"] == href), None)
-            title = p_obj["title"] if p_obj else href
-            label = _CHECKOUT_LABEL_1999.get(status, status)
-            lines.append(f"▸ {title}：{label}")
-        if any(s == "amazon_auth_needed" for s in checkout_results.values()):
-            lines += [
-                "",
-                "⚠ Amazon Pay session 已過期，請重新授權：",
-                "  1. 在本機執行：python generate_1999_session.py",
-                "  2. 完成後更新 GitHub Secret：AMAZON_1999_STORAGE_STATE_B64",
-            ]
+    lines += [
+        "",
+        "─ 點擊下方連結前往購物車結帳 ─",
+        f"  {CHECKOUT_URL}",
+        "",
+        f"完整搜尋頁：{SEARCH_URL}",
+    ]
+    _send_email(GMAIL_RECIPIENTS, subject, "\n".join(lines))
+
+
+def _send_order_result_email(products: list, checkout_results: dict):
+    """個人通知：下單結果只寄給 ACCOUNT_1999（下單帳號本人）。"""
+    if not ACCOUNT_1999 or ACCOUNT_1999 not in GMAIL_RECIPIENTS:
+        log.warning("ACCOUNT_1999 不在 GMAIL_RECIPIENTS 中，無法寄送個人下單結果通知")
+        return
+
+    statuses = list(checkout_results.values())
+    if "success" in statuses:
+        outcome = "✅ 已自動下單完成"
+    elif "amazon_auth_needed" in statuses:
+        outcome = "⚠ Amazon Pay 需要重新授權"
     else:
+        outcome = "❌ 下單失敗"
+
+    subject = f"【1999 下單結果】{outcome}"
+    now_str = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    lines = [
+        f"偵測時間：{now_str}（台灣時間）",
+        "",
+        "=" * 50,
+        "各商品下單結果",
+        "=" * 50,
+    ]
+    for href, status in checkout_results.items():
+        p_obj = next((p for p in products if p["href"] == href), None)
+        title = p_obj["title"] if p_obj else href
+        label = _CHECKOUT_LABEL_1999.get(status, status)
+        lines.append(f"▸ {title}：{label}")
+
+    if "amazon_auth_needed" in statuses:
         lines += [
             "",
-            "─ 點擊下方連結前往購物車結帳 ─",
-            f"  {CHECKOUT_URL}",
+            "⚠ Amazon Pay session 已過期，請重新授權：",
+            "  1. 在本機執行：python generate_1999_session.py",
+            "  2. 完成後更新 GitHub Secret：AMAZON_1999_STORAGE_STATE_B64",
+        ]
+    if "success" in statuses:
+        lines += [
+            "",
+            f"請前往 1999 確認訂單：{BASE_URL}/mypage",
         ]
 
     lines += ["", f"完整搜尋頁：{SEARCH_URL}"]
-    _send_email(GMAIL_RECIPIENTS, subject, "\n".join(lines))
+    _send_email([ACCOUNT_1999], subject, "\n".join(lines))
 
 
 # ─────────────────────────────────────────────
@@ -560,7 +592,9 @@ async def check_once(page, context=None) -> bool:
                 f"發送通知：{len(to_notify)} 件"
                 f"（共 {len(products)} 件，跳過 {len(products)-len(to_notify)} 件冷卻中）"
             )
-            send_notify_email(to_notify, checkout_results or None)
+            send_notify_email(to_notify)
+            if checkout_results:
+                _send_order_result_email(to_notify, checkout_results)
             for p in to_notify:
                 notified[p["href"]] = now.isoformat()
         else:
