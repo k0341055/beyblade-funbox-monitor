@@ -99,6 +99,9 @@ SKIP_KEYWORDS: list[str] = [
 SKIP_BUY_KEYWORDS: list[str] = [
     "BX-33",
     "BX-26",
+    "BXG-33",
+    "BXG-29",
+    "蜘蛛人",
     "暴風天馬",
     "銀牙烈虎",
     "烈焰飛鳳",
