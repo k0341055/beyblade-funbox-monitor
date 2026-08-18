@@ -840,6 +840,10 @@ def check_once() -> bool:
                         purchased.setdefault(href, [])
                         if acct_email not in purchased[href]:
                             purchased[href].append(acct_email)
+                            # ── 新增：成功後重置失敗計數器 ──
+                            if href in attempts and acct_email in attempts.get(href, {}):
+                                attempts[href][acct_email] = 0
+                                log.info(f"[{acct_email}] 購買成功，重置失敗計數器：{href}")
                             p_obj = next((x for x in to_notify if x["href"] == href), None)
                             log.info(f"已記錄購買成功：{acct_email} → {p_obj['title'] if p_obj else href}")
                     else:
