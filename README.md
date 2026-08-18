@@ -38,6 +38,7 @@ flowchart TD
     SITE4 --> NOCD
 
     COOL1 -->|新商品 / 到期| MAIL1["Gmail → 全體收件人"]
+    COOL1 -->|同輪觸發\nAUTO_CHECKOUT=true| BUY1["Amazon Pay 自動下單\n加入購物車 → /order\n→ Amazon Pay OAuth\n→ /orderamazon 確認"]
     COOL2 -->|新商品 / 到期| MAIL2["Gmail → 全體收件人"]
     NOCD --> MAIL3["Gmail → 全體收件人\n含一鍵結帳連結"]
 
@@ -89,7 +90,7 @@ beyblade-funbox-monitor/
 | 每次執行輪數 | **15 輪**（間隔 5~8 秒） | **60 輪**（間隔 3~5 秒） | **50 輪**（間隔 3~5 秒） | **35 輪**（間隔 3~5 秒） |
 | 執行時長 / timeout | ~2 分鐘 / 25 min | ~5 分鐘 / 25 min | ~5 分鐘 / 25 min | ~3.5 分鐘 / 25 min |
 | 通知冷卻 | 1 小時冷卻 | 1 小時冷卻 | **無冷卻（每輪有庫存即通知）** | **無冷卻（每輪有庫存即通知）** |
-| 自動下單 | 無（1999 結帳需 reCAPTCHA） | **有**（3 帳號平行，7-11 貨到付款） | **有**（加入購物車 + 自動結帳） | **有**（加入購物車 + 自動結帳） |
+| 自動下單 | **有**（Amazon Pay，需預存 session） | **有**（3 帳號平行，7-11取貨先付款） | **有**（加入購物車 + 自動結帳） | **有**（加入購物車 + 自動結帳） |
 | 觸發頻率 | **每 5 分鐘一次** | **每 5 分鐘一次** | **每 5 分鐘一次** | **每 5 分鐘一次**（獨立 cron-job） |
 
 ---
@@ -126,12 +127,50 @@ beyblade-funbox-monitor/
 - 同款商品 **1 小時內最多通知一次**（`seen_products.json` 記錄上次通知時間）
 - 商品下架 → 當輪從 `seen_products` 移除 → 重新上架視為全新，立即通知
 
+### 自動下單流程（Amazon Pay）
+
+```
+偵測到需通知的有庫存商品（AUTO_CHECKOUT=true）
+  │
+  └─ Playwright（含預存 Amazon session）
+        ├─ 商品頁 → 點擊「カートに入れる」（多 selector 備援）
+        ├─ GET /order → 點擊 Amazon Pay 按鈕
+        ├─ Amazon OAuth 自動完成（靠 storage_state 內的 Amazon cookies）
+        ├─ 302 跳回 /orderamazon?amazonCheckoutSessionId=...
+        ├─ 點擊「我同意並下單。」（#btnSendRight）
+        └─ 偵測「採購訂單（已完成）」→ success
+```
+
+| 結帳狀態 | 說明 |
+|---|---|
+| `success` | ✅ 已自動下單完成 |
+| `amazon_auth_needed` | ⚠ Amazon Pay session 過期，需重新執行 `generate_1999_session.py` |
+| `cart_not_found` | ❌ 找不到加入購物車按鈕（可能已售完） |
+| `no_amazon_pay` | ❌ 找不到 Amazon Pay 按鈕 |
+| `login_failed` | ❌ 1999 帳號登入失敗 |
+| `failed` | ❌ 未知錯誤 |
+
+#### Amazon Pay Session 設定步驟（首次或 session 過期）
+
+```bash
+# 1. 在本機執行
+python 1999_monitor/generate_1999_session.py
+# 在開啟的瀏覽器中：登入 1999.co.jp → 加入購物車 → 點 Amazon Pay → 完成授權
+# 等待跳回 /orderamazon（不要按下單）
+
+# 2. 上傳至 GitHub Secret
+base64 -i 1999_monitor/1999_storage_state.json | pbcopy
+# GitHub Repo → Settings → Secrets → AMAZON_1999_STORAGE_STATE_B64 → 貼上
+```
+
+同時需設定 GitHub Secrets：`ACCOUNT_1999`（1999 登入 email）、`PASSWORD_1999`（密碼）。
+
 ### Email 通知格式
 
 - 主旨：`【1999 beyblade X 補貨！】偵測到 N 件商品`
 - 每件商品顯示：商品名、發售日、價格（含折扣）、商品連結
-- 末尾附上一鍵結帳連結（`https://www.1999.co.jp/order`）與完整搜尋頁連結
-- 無自動下單（1999.co.jp 結帳需通過 reCAPTCHA，須人工完成）
+- 有自動下單時：附上各商品結帳狀態；`amazon_auth_needed` 時附更新 session 說明
+- 無自動下單時：末尾附上結帳連結（`https://www.1999.co.jp/order`）
 
 ---
 
