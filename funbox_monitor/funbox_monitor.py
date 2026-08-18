@@ -600,7 +600,7 @@ def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
             if email in purchased.get(href, []):
                 log.info(f"[{email}] 已成功購買，跳過：{p['title']}")
                 continue
-            if attempts.get(href, {}).get(email, 0) >= 1:
+            if attempts.get(href, {}).get(email, 0) >= 10:
                 log.info(f"[{email}] 已嘗試 10 次失敗，跳過：{p['title']}")
                 continue
             result.append(p)
