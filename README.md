@@ -167,10 +167,8 @@ base64 -i 1999_monitor/1999_storage_state.json | pbcopy
 
 ### Email 通知格式
 
-- 主旨：`【1999 beyblade X 補貨！】偵測到 N 件商品`
-- 每件商品顯示：商品名、發售日、價格（含折扣）、商品連結
-- 有自動下單時：附上各商品結帳狀態；`amazon_auth_needed` 時附更新 session 說明
-- 無自動下單時：末尾附上結帳連結（`https://www.1999.co.jp/order`）
+- **廣播信**（→ 全體 GMAIL_RECIPIENTS）：商品資訊 + 結帳連結，不含下單結果
+- **個人信**（→ ACCOUNT_1999 本人）：各商品下單狀態（✅/⚠/❌）+ 後續操作說明；僅在 `AUTO_CHECKOUT=true` 且有嘗試下單時發送
 
 ---
 
