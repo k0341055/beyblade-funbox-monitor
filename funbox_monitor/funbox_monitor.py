@@ -567,7 +567,7 @@ def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
     purchased: {href: [已成功購買的帳號 email 清單]}
     attempts:  {href: {帳號email: 失敗次數}}
     - 已成功購買過 → 跳過
-    - 失敗嘗試 ≥ 2 次 → 跳過（第三次看到同一商品不再浪費時間）
+    - 失敗嘗試 ≥ 10 次 → 跳過（第11次看到同一商品不再浪費時間）
     - 其餘 → 嘗試下單
 
     回傳 {email: {"added": [...hrefs...], "attempted": [...], "checkout": status}}
@@ -591,7 +591,7 @@ def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
 
     def _products_for_account(email: str) -> list:
         """
-        已成功購買 → 跳過；失敗嘗試 ≥ 2 → 跳過；其餘都試。
+        已成功購買 → 跳過；失敗嘗試 ≥ 10 → 跳過；其餘都試。
         一般款與隨機包邏輯相同（第一次成功後就不再重複，失敗兩次後放棄）。
         """
         result = []
@@ -600,8 +600,8 @@ def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
             if email in purchased.get(href, []):
                 log.info(f"[{email}] 已成功購買，跳過：{p['title']}")
                 continue
-            if attempts.get(href, {}).get(email, 0) >= 2:
-                log.info(f"[{email}] 已嘗試 2 次失敗，跳過：{p['title']}")
+            if attempts.get(href, {}).get(email, 0) >= 1:
+                log.info(f"[{email}] 已嘗試 10 次失敗，跳過：{p['title']}")
                 continue
             result.append(p)
         return result
@@ -826,9 +826,10 @@ def check_once() -> bool:
             or _parse_ts(notified[p["href"]]) < cutoff
         ]
 
-        if to_notify:
-            account_results = auto_buy_all(to_notify, purchased, attempts)
-
+    
+        account_results = auto_buy_all(to_notify, purchased, attempts)
+        
+        if to_notify or account_results:
             for acct_email, result in account_results.items():
                 checkout = result.get("checkout", {})
                 for href, status in checkout.items():
