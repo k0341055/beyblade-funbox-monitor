@@ -97,6 +97,8 @@ jobs:
           AUTO_CHECKOUT:     ${{ inputs.auto_checkout || 'false' }}
           ACCOUNT_1999:      ${{ secrets.ACCOUNT_1999 }}
           PASSWORD_1999:     ${{ secrets.PASSWORD_1999 }}
+          AMAZON_ACCOUNT:    ${{ secrets.AMAZON_ACCOUNT }}
+          AMAZON_PASSWORD:   ${{ secrets.AMAZON_PASSWORD }}
           STORAGE_STATE_FILE: '1999_storage_state.json'
           ORDER_STATE_FILE:   '1999_order_state.json'
         working-directory: 1999_monitor
