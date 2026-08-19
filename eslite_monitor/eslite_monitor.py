@@ -3,6 +3,8 @@
 
 MONITOR_MODE=exhibition（預設）→ 監控書展 API（book_exhibits），不含個別追蹤商品
 MONITOR_MODE=product           → 監控 EXTRA_PRODUCT_GUIDS 個別追蹤商品
+MONITOR_MODE=keyword           → 監控 Holmes 搜尋 API（ESLITE_SEARCH_URL 關鍵字搜尋）
+MONITOR_MODE=combined          → 展覽 API + 關鍵字搜尋合併，展覽下架時自動降級
 
 兩種模式共用：登入、購物車、自動下單、Email 通知。
 通知邏輯：每輪偵測到有庫存即通知（無冷卻）；下單去重由 ORDER_STATE_FILE 負責。
@@ -763,7 +765,8 @@ class ExhibitionMonitor(EsliteMonitorBase):
         walk(data)
         return products
 
-    def fetch_in_stock_products(self, page) -> list:
+    def _fetch_exhibition(self, page) -> list:
+        """呼叫書展 API，回傳有庫存商品清單（供 fetch_in_stock_products 和 CombinedMonitor 共用）。"""
         page.goto(self.API_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(1500)
 
@@ -787,7 +790,7 @@ class ExhibitionMonitor(EsliteMonitorBase):
             if not stock or stock <= 0:
                 continue
             lim = f"帳號上限:{p['account_qty_limit']}件" if p.get("account_qty_limit") else "無限購"
-            log.info(f"有庫存 → {name} | 庫存:{stock} 件 | {lim} | {p['status']}")
+            log.info(f"有庫存 → {name}（{guid}）| 庫存:{stock} 件 | {lim} | {p['status']}")
             result.append({"guid": guid, **p})
 
         if len(all_products) == 0:
@@ -796,9 +799,12 @@ class ExhibitionMonitor(EsliteMonitorBase):
             else:
                 log.warning("展覽 API 回傳 0 件商品（書展可能已下架或 URL 已更換），繼續監控")
         else:
-            kw_note = f"（關鍵字篩選後）" if self.MONITOR_KEYWORDS else ""
+            kw_note = "（關鍵字篩選後）" if self.MONITOR_KEYWORDS else ""
             log.info(f"展覽 API 抽取 {len(all_products)} 件{kw_note}，有庫存 {len(result)} 件")
         return result
+
+    def fetch_in_stock_products(self, page) -> list:
+        return self._fetch_exhibition(page)
 
 
 # ─────────────────────────────────────────────
@@ -827,6 +833,161 @@ class ProductMonitor(EsliteMonitorBase):
 
 
 # ─────────────────────────────────────────────
+# 關鍵字搜尋監控（Holmes 搜尋 API）
+# ─────────────────────────────────────────────
+
+def _parse_holmes_response(eslite_base: str, raw: str) -> list:
+    """
+    解析 Holmes 搜尋 API（holmes.eslite.com/v1/search）回應。
+    回傳格式與其他 fetch 方法一致：[{guid, name, stock, status, url, ...}]
+    URL 已帶 status=add_to_shopping_cart 故結果通常已全為有庫存，仍做二次驗證。
+    """
+    data = json.loads(raw)
+
+    # 找出商品清單（嘗試常見欄位名稱）
+    items = None
+    if isinstance(data, list):
+        items = data
+    else:
+        for key in ("result", "data", "products", "items", "hits", "list"):
+            val = data.get(key)
+            if isinstance(val, list):
+                items = val
+                break
+
+    if items is None:
+        keys = list(data.keys()) if isinstance(data, dict) else type(data)
+        log.warning(f"Holmes API 回傳未知格式，無法解析，keys: {keys}")
+        return []
+
+    log.info(f"Holmes 搜尋 API 取得 {len(items)} 筆結果")
+
+    result = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        guid = str(item.get("product_guid") or item.get("guid") or "").strip()
+        name = item.get("name", "").strip()
+        if not guid or not name:
+            continue
+        try:
+            stock = int(item.get("stock") or 0)
+        except (TypeError, ValueError):
+            stock = 0
+        btn_status = (item.get("product_button_status") or item.get("status") or "").strip()
+        in_stock = (stock > 0) or (btn_status == "add_to_shopping_cart")
+        if not in_stock:
+            continue
+
+        acct_lim = item.get("account_qty_limit")
+        ord_lim  = item.get("order_qty_limit")
+        lim = f"帳號上限:{acct_lim}件" if acct_lim else "無限購"
+        log.info(f"有庫存（搜尋）→ {name}（{guid}）| 庫存:{stock} 件 | {lim} | {btn_status}")
+        result.append({
+            "guid": guid,
+            "name": name,
+            "stock": stock,
+            "status": btn_status,
+            "account_qty_limit": acct_lim,
+            "order_qty_limit":   ord_lim,
+            "url": f"{eslite_base}/product/{guid}",
+        })
+
+    return result
+
+
+class KeywordSearchMonitor(EsliteMonitorBase):
+    """
+    透過 Holmes 搜尋 API 監控關鍵字商品。
+    URL 帶 status=add_to_shopping_cart，API 層已篩選有庫存商品。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.SEARCH_URL = os.environ.get("ESLITE_SEARCH_URL", "").strip()
+        if not self.SEARCH_URL:
+            raise ValueError(
+                "ESLITE_SEARCH_URL 環境變數未設定（請設定 GitHub Variable ESLITE_SEARCH_URL）"
+            )
+
+    def _fetch_keyword_search(self, page) -> list:
+        page.goto(self.SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(1500)
+        try:
+            raw = page.inner_text("pre")
+        except Exception:
+            raw = page.inner_text("body")
+        return _parse_holmes_response(self.ESLITE_BASE, raw)
+
+    def fetch_in_stock_products(self, page) -> list:
+        products = self._fetch_keyword_search(page)
+        log.info(f"關鍵字搜尋，有庫存 {len(products)} 件")
+        return products
+
+
+# ─────────────────────────────────────────────
+# 合併監控（展覽 API + 關鍵字搜尋）
+# ─────────────────────────────────────────────
+
+class CombinedMonitor(ExhibitionMonitor):
+    """
+    展覽 API（ESLITE_API_URL）與 Holmes 關鍵字搜尋（ESLITE_SEARCH_URL）合併監控。
+    - 展覽 API 下架或失敗時自動降級，不中斷整體監控。
+    - 兩者結果以 guid 去重，以展覽 API 資料優先。
+    - ESLITE_API_URL 未設定時純跑關鍵字搜尋。
+    """
+
+    def __init__(self):
+        # 直接呼叫基底類別，繞過 ExhibitionMonitor 的 ValueError（API_URL 可為空）
+        EsliteMonitorBase.__init__(self)
+        self.API_URL = os.environ.get("ESLITE_API_URL", "").strip()
+        _kw_env = os.environ.get("MONITOR_KEYWORDS", "").strip()
+        self.MONITOR_KEYWORDS = [k.strip().upper() for k in _kw_env.split(",") if k.strip()]
+        self.SEARCH_URL = os.environ.get("ESLITE_SEARCH_URL", "").strip()
+        if not self.SEARCH_URL:
+            raise ValueError(
+                "ESLITE_SEARCH_URL 環境變數未設定（combined 模式需要此變數）"
+            )
+
+    def _fetch_keyword_search(self, page) -> list:
+        page.goto(self.SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(1500)
+        try:
+            raw = page.inner_text("pre")
+        except Exception:
+            raw = page.inner_text("body")
+        return _parse_holmes_response(self.ESLITE_BASE, raw)
+
+    def fetch_in_stock_products(self, page) -> list:
+        products: dict = {}
+
+        # ① 展覽 API（可選，失敗不中斷）
+        if self.API_URL:
+            try:
+                for p in self._fetch_exhibition(page):
+                    products[p["guid"]] = p
+                log.info(f"展覽 API 貢獻 {len(products)} 件")
+            except Exception as e:
+                log.warning(f"展覽 API 失敗（{e}），跳過，繼續關鍵字搜尋")
+        else:
+            log.info("ESLITE_API_URL 未設定，跳過展覽 API")
+
+        # ② 關鍵字搜尋（去重加入）
+        try:
+            search_results = self._fetch_keyword_search(page)
+            before = len(products)
+            for p in search_results:
+                if p["guid"] not in products:
+                    products[p["guid"]] = p
+            added = len(products) - before
+            log.info(f"關鍵字搜尋貢獻 {added} 件（去重後，總計 {len(products)} 件）")
+        except Exception as e:
+            log.error(f"關鍵字搜尋失敗：{e}")
+
+        return list(products.values())
+
+
+# ─────────────────────────────────────────────
 # 入口
 # ─────────────────────────────────────────────
 
@@ -834,5 +995,9 @@ if __name__ == "__main__":
     mode = os.environ.get("MONITOR_MODE", "exhibition").lower()
     if mode == "product":
         ProductMonitor().run()
+    elif mode == "keyword":
+        KeywordSearchMonitor().run()
+    elif mode == "combined":
+        CombinedMonitor().run()
     else:
         ExhibitionMonitor().run()
