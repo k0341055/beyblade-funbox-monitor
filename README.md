@@ -135,7 +135,9 @@ beyblade-funbox-monitor/
   └─ Playwright（含預存 Amazon session）
         ├─ 商品頁 → 點擊「カートに入れる」（多 selector 備援）
         ├─ GET /order → 點擊 Amazon Pay 按鈕
-        ├─ Amazon OAuth 自動完成（靠 storage_state 內的 Amazon cookies）
+        ├─ 等待跳轉至 amazon.co.jp
+        │     ├─ 已登入 → 偵測「続行」按鈕並點擊
+        │     └─ 未登入 → 填入 AMAZON_ACCOUNT / AMAZON_PASSWORD 完成登入
         ├─ 302 跳回 /orderamazon?amazonCheckoutSessionId=...
         ├─ 點擊「我同意並下單。」（#btnSendRight）
         └─ 偵測「採購訂單（已完成）」→ success
@@ -144,13 +146,13 @@ beyblade-funbox-monitor/
 | 結帳狀態 | 說明 |
 |---|---|
 | `success` | ✅ 已自動下單完成 |
-| `amazon_auth_needed` | ⚠ Amazon Pay session 過期，需重新執行 `generate_1999_session.py` |
+| `amazon_auth_needed` | ⚠ Amazon Pay 授權失敗（OTP 驗證、帳密錯誤，或需重新執行 `generate_1999_session.py`） |
 | `cart_not_found` | ❌ 找不到加入購物車按鈕（可能已售完） |
 | `no_amazon_pay` | ❌ 找不到 Amazon Pay 按鈕 |
 | `login_failed` | ❌ 1999 帳號登入失敗 |
 | `failed` | ❌ 未知錯誤 |
 
-#### Amazon Pay Session 設定步驟（首次或 session 過期）
+#### Amazon Pay Session 設定步驟（首次或 session 過期後需要 OTP 的情況）
 
 ```bash
 # 1. 在本機執行
@@ -163,7 +165,7 @@ base64 -i 1999_monitor/1999_storage_state.json | pbcopy
 # GitHub Repo → Settings → Secrets → AMAZON_1999_STORAGE_STATE_B64 → 貼上
 ```
 
-同時需設定 GitHub Secrets：`ACCOUNT_1999`（1999 登入 email）、`PASSWORD_1999`（密碼）。
+需設定 GitHub Secrets：`ACCOUNT_1999`（1999 email）、`PASSWORD_1999`（1999 密碼）、`AMAZON_ACCOUNT`（Amazon Japan email）、`AMAZON_PASSWORD`（Amazon Japan 密碼）。
 
 ### Email 通知格式
 
@@ -483,6 +485,7 @@ API 目標 URL 存放於 Variables（内容可見，但不暴露在程式碼中�
 | `SEARCH_URL_1999` | 1999 | 1999.co.jp Beyblade X 搜尋頁 URL |
 | `ESLITE_API_URL` | 誠品書展 | 誠品書展 API URL（`athena.eslite.com/api/v1/book_exhibits/...`） |
 | `ESLITE_EVENT_URL` | 誠品 | 誠品書展活動頁 URL（選填，附於通知信末尾） |
+| `ESLITE_SEARCH_URL` | 誠品關鍵字 | Holmes 搜尋 API URL（`holmes.eslite.com/v1/search?...`，combined / keyword 模式必填） |
 
 > 設定路徑：GitHub Repo → Settings → Secrets and variables → Actions → **Variables** 標籤 → New repository variable
 
@@ -505,6 +508,11 @@ API 目標 URL 存放於 Variables（内容可見，但不暴露在程式碼中�
 | `CHECKOUT_CITY` | 誠品 | 取貨城市（如 `XX市`） |
 | `CHECKOUT_STORE_CODE` | 誠品 | 門市代碼（如 `B0XX` XX門市） |
 | `ESLITE_EXTRA_PRODUCTS` | 誠品個別商品 | 要追蹤的商品 GUID，逗號分隔（ProductMonitor 使用） |
+| `ACCOUNT_1999` | 1999 | 1999.co.jp 登入 email |
+| `PASSWORD_1999` | 1999 | 1999.co.jp 登入密碼 |
+| `AMAZON_ACCOUNT` | 1999 | Amazon Japan 登入 email（Amazon Pay 授權用） |
+| `AMAZON_PASSWORD` | 1999 | Amazon Japan 登入密碼（Amazon Pay 授權用） |
+| `AMAZON_1999_STORAGE_STATE_B64` | 1999 | Amazon Pay session 備援（base64 編碼），session 過期且需 OTP 時需更新 |
 | `ESLITE_STORAGE_STATE_B64` | 誠品 | Session 備援（base64 編碼的 storage_state.json） |
 
 > 設定路徑：GitHub Repo → Settings → Secrets and variables → Actions → **Secrets** 標籤 → New repository secret
