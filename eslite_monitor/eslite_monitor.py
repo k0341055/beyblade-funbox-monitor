@@ -187,7 +187,7 @@ class EsliteMonitorBase(ABC):
             acct_lim = data.get("account_qty_limit")
             ord_lim  = data.get("order_qty_limit")
             log.info(
-                f"有庫存 → {name} | 庫存:{stock} 件 | "
+                f"有庫存 → {name}（{product_guid}）| 庫存:{stock} 件 | "
                 f"{'帳號上限:'+str(acct_lim)+'件' if acct_lim else '無限購'} | {btn_status}"
             )
             return {
