@@ -11,7 +11,10 @@ on:
         description: '購買模式：sequential（帳號平行、商品逐件，預設）或 parallel（帳號×商品全平行）'
         required: false
         default: ''
-
+      parallel_checkout_limit:
+        description: '平行結帳最大同時任務數'
+        required: false
+        default: '6'
 jobs:
   monitor:
     runs-on: ubuntu-latest
@@ -77,7 +80,7 @@ jobs:
           SEARCH_URL:              ${{ vars.FUNBOX_SEARCH_URL }}
           CHECK_ROUNDS:            ${{ inputs.check_rounds || '60' }}
           CHECKOUT_MODE:           ${{ inputs.checkout_mode || 'parallel' }}
-          PARALLEL_CHECKOUT_LIMIT: '6'
+          PARALLEL_CHECKOUT_LIMIT: ${{ inputs.parallel_checkout_limit || '6' }}
           STATE_FILE:              'seen_products.json'
         working-directory: funbox_monitor
         run: python funbox_monitor.py
