@@ -76,7 +76,7 @@ jobs:
           FUNBOX_PASSWORD_3: ${{ secrets.FUNBOX_PASSWORD_3 }}
           SEARCH_URL:              ${{ vars.FUNBOX_SEARCH_URL }}
           CHECK_ROUNDS:            ${{ inputs.check_rounds || '60' }}
-          CHECKOUT_MODE:           ${{ inputs.checkout_mode || 'sequential' }}
+          CHECKOUT_MODE:           ${{ inputs.checkout_mode || 'parallel' }}
           PARALLEL_CHECKOUT_LIMIT: '6'
           STATE_FILE:              'seen_products.json'
         working-directory: funbox_monitor
