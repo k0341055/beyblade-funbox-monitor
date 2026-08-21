@@ -849,7 +849,7 @@ def _parse_holmes_response(eslite_base: str, raw: str) -> list:
     if isinstance(data, list):
         items = data
     else:
-        for key in ("result", "data", "products", "items", "hits", "list"):
+        for key in ("results", "data", "products", "items", "hits", "list"):
             val = data.get(key)
             if isinstance(val, list):
                 items = val
