@@ -861,7 +861,8 @@ def _parse_holmes_response(eslite_base: str, raw: str) -> list:
         return []
 
     log.info(f"Holmes 搜尋 API 取得 {len(items)} 筆結果")
-
+    if items:
+        log.info(f"holmes first data: {json.dumps(items[0], ensure_ascii=False)[:500]}")
     result = []
     for item in items:
         if not isinstance(item, dict):
