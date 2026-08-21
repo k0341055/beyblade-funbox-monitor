@@ -580,16 +580,19 @@ ESLITE_EVENT_URL={設定於 GitHub Variable ESLITE_EVENT_URL}
 |---|---|---|
 | `SEARCH_URL` | GitHub Variable `FUNBOX_SEARCH_URL` | 監控目標（可改為任意 Cyberbiz 集合 URL） |
 | `CHECK_ROUNDS` | `1`（本機預設） | 執行輪數（GitHub Actions 設為 60） |
-| `CART_QTY` | `3` | 每件商品目標加入數量 |
-| `MAX_BUY_PRODUCTS` | `0`（無限制） | 限制本次最多購買幾件（測試用） |
+| `CHECKOUT_MODE` | YML input，預設 `sequential` | `sequential`：帳號平行、每帳號商品逐件；`parallel`：帳號×商品全平行 |
+| `PARALLEL_CHECKOUT_LIMIT` | `6`（YML 硬寫） | parallel 模式最大並發 thread 數 |
+| `PRIORITY_KEYWORDS` | 空（選填 env） | 逗號分隔關鍵字，符合商品永遠排最前面（不管購買次數） |
+| `MAX_BUY_PRODUCTS` | `0`（無限制） | 限制本次最多購買幾件（0 = 不限，測試用） |
 | `TEST_MODE` | `0` | 設為 `1` 時 email 主旨加【測試】標注 |
 
 #### 誠品
 
 | 變數 | 來源 | 說明 |
 |---|---|---|
-| `MONITOR_MODE` | `exhibition` | `exhibition`（書展 API）或 `product`（個別商品 GUID） |
-| `ESLITE_API_URL` | GitHub Variable `ESLITE_API_URL` | ExhibitionMonitor 監控目標（必填，可替換為其他誠品活動頁 API） |
+| `MONITOR_MODE` | `combined`（Actions 預設） | `combined`（書展+搜尋合併）、`keyword`（搜尋）、`exhibition`（書展 API）、`product`（個別商品） |
+| `ESLITE_API_URL` | GitHub Variable `ESLITE_API_URL` | ExhibitionMonitor / combined 模式使用，書展下架可留空 |
+| `ESLITE_SEARCH_URL` | GitHub Variable `ESLITE_SEARCH_URL` | Holmes 搜尋 API URL，keyword / combined 模式必填 |
 | `ESLITE_EVENT_URL` | GitHub Variable `ESLITE_EVENT_URL` | 誠品書展活動頁 URL（選填，附於通知信末尾） |
 | `ESLITE_EXTRA_PRODUCTS` | Secret `ESLITE_EXTRA_PRODUCTS` | ProductMonitor 追蹤的商品 GUID，逗號分隔 |
 | `CHECK_ROUNDS` | `1`（本機預設） | 執行輪數（書展：50，個別商品：35） |
