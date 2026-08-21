@@ -36,6 +36,14 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+# ── 略過通知的商品關鍵字（與 1999_monitor 同步） ──────────────
+# 商品名稱含以下任一關鍵字 → 整輪靜默略過（不通知、不下單）
+SKIP_KEYWORDS: list[str] = [
+    "BX-43",
+    "BX-25",
+    "BX-11",
+]
+
 # ─────────────────────────────────────────────
 # 基底類別（共用邏輯）
 # ─────────────────────────────────────────────
@@ -655,6 +663,21 @@ class EsliteMonitorBase(ABC):
 
             if not products:
                 log.info("目前無庫存商品，繼續監控")
+                return True
+
+            # 略過 SKIP_KEYWORDS 商品（不通知、不下單）
+            if SKIP_KEYWORDS:
+                before = len(products)
+                products = [
+                    p for p in products
+                    if not any(kw.upper() in p["title"].upper() for kw in SKIP_KEYWORDS)
+                ]
+                skipped = before - len(products)
+                if skipped:
+                    log.info(f"略過 {skipped} 件符合 SKIP_KEYWORDS 的商品")
+
+            if not products:
+                log.info("所有商品均在 SKIP_KEYWORDS 清單，本輪靜默")
                 return True
 
             log.info(f"發送庫存通知：{len(products)} 件")
