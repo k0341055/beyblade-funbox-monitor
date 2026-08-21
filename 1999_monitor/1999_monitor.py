@@ -425,83 +425,76 @@ async def _login_1999(page) -> bool:
 async def _handle_amazon_auth(page) -> str:
     """
     處理 Amazon Pay 授權頁：
-    - 已登入 → 偵測「続行」按鈕並點擊
-    - 未登入 → 填入 AMAZON_ACCOUNT / AMAZON_PASSWORD 完成登入
+    1. 先判斷是否有 email 輸入欄 → 有 = 未登入 → 填帳密
+    2. 登入後或已登入 → 偵測同意/続行按鈕並點擊
     回傳 "ok" 代表授權完成，其餘代碼表示失敗。
     """
     await page.wait_for_load_state("domcontentloaded", timeout=15_000)
     await page.wait_for_timeout(_jitter(1500))
+    log.info(f"[Amazon Pay] 授權頁：{page.url}")
 
-    cur = page.url
-    log.info(f"[Amazon Pay] 授權頁：{cur}")
+    # ① 若有 email 輸入欄 → 尚未登入，填帳密
+    email_loc = page.locator("input[id='ap_email'], input[type='email']").first
+    needs_login = await email_loc.count() > 0 and await email_loc.is_visible(timeout=3_000)
 
-    # ① 偵測「続行」按鈕（已登入狀態，直接繼續）
-    continue_sel = (
-        "input[name='consentApply'], "
-        "input[value*='続行'], input[value*='同意して'], "
-        "button:has-text('続行'), button:has-text('同意して'), "
-        "input[id='continue'], input[id='signInSubmit']"
-    )
-    try:
-        cont = page.locator(continue_sel).first
-        if await cont.count() > 0 and await cont.is_visible(timeout=5_000):
-            log.info("[Amazon Pay] 偵測到已登入，點擊「続行」")
-            await cont.click()
-            await page.wait_for_timeout(_jitter(2000))
-            return "ok"
-    except Exception:
-        pass
+    if needs_login:
+        if not AMAZON_ACCOUNT or not AMAZON_PASSWORD:
+            log.warning("[Amazon Pay] 需要登入但未設定 AMAZON_ACCOUNT / AMAZON_PASSWORD")
+            return "amazon_auth_needed"
 
-    # ② 未偵測到「続行」→ 嘗試用帳密登入
-    if not AMAZON_ACCOUNT or not AMAZON_PASSWORD:
-        log.warning("[Amazon Pay] 未設定 AMAZON_ACCOUNT / AMAZON_PASSWORD，無法自動登入")
-        return "amazon_auth_needed"
+        log.info(f"[Amazon Pay] 填入 Email：{_mask_email(AMAZON_ACCOUNT)}")
+        await email_loc.fill(AMAZON_ACCOUNT)
+        await page.wait_for_timeout(_jitter(500))
 
-    log.info(f"[Amazon Pay] 未偵測到已登入狀態，嘗試填入帳密（{_mask_email(AMAZON_ACCOUNT)}）")
+        # 點「次へ進む」
+        next_btn = page.locator("input[id='continue']").first
+        if await next_btn.count() > 0 and await next_btn.is_visible(timeout=3_000):
+            await next_btn.click()
+            await page.wait_for_timeout(_jitter(1500))
 
-    try:
-        # Step A：填入 Email
-        email_loc = page.locator("input[type='email'], input[name='email']").first
-        if await email_loc.count() > 0 and await email_loc.is_visible(timeout=5_000):
-            await email_loc.fill(AMAZON_ACCOUNT)
-            await page.wait_for_timeout(_jitter(500))
-
-            # 部分頁面 Email / 密碼分兩步
-            next_btn = page.locator("input[id='continue'], input[name='continue']").first
-            if await next_btn.count() > 0 and await next_btn.is_visible(timeout=3_000):
-                await next_btn.click()
-                await page.wait_for_timeout(_jitter(1500))
-
-        # Step B：填入密碼
-        pwd_loc = page.locator("input[type='password'], input[name='password']").first
+        # 填密碼
+        pwd_loc = page.locator("input[id='ap_password'], input[type='password']").first
         if await pwd_loc.count() == 0 or not await pwd_loc.is_visible(timeout=5_000):
             log.warning("[Amazon Pay] 找不到密碼輸入框")
             return "amazon_auth_needed"
         await pwd_loc.fill(AMAZON_PASSWORD)
         await page.wait_for_timeout(_jitter(500))
 
-        # Step C：點擊登入
-        signin_btn = page.locator(
-            "input[id='signInSubmit'], input[name='signInSubmit'], "
-            "button[type='submit']"
-        ).first
+        # 點「ログイン」
+        signin_btn = page.locator("input[id='signInSubmit']").first
         if await signin_btn.count() == 0 or not await signin_btn.is_visible(timeout=3_000):
-            log.warning("[Amazon Pay] 找不到登入提交按鈕")
+            log.warning("[Amazon Pay] 找不到登入按鈕")
             return "amazon_auth_needed"
         await signin_btn.click()
-        await page.wait_for_timeout(_jitter(3000))
+        # 等待頁面導到 payments.amazon.co.jp（授權確認頁）
+        await page.wait_for_load_state("domcontentloaded", timeout=15_000)
+        await page.wait_for_timeout(_jitter(2000))
 
-        # 確認已離開 signin 頁
         if "amazon.co.jp/ap/signin" in page.url:
-            log.warning("[Amazon Pay] 登入後仍停在 signin 頁，可能需要 OTP 或帳密錯誤")
+            log.warning("[Amazon Pay] 登入後仍停在 signin 頁（OTP 驗證或帳密錯誤）")
             return "amazon_auth_needed"
 
-        log.info("[Amazon Pay] Amazon 帳密登入成功")
-        return "ok"
+        log.info(f"[Amazon Pay] 帳密登入成功，目前頁面：{page.url}")
 
-    except Exception as e:
-        log.error(f"[Amazon Pay] 登入例外：{e}")
-        return "amazon_auth_needed"
+    # ② 已登入（或登入後）→ 偵測同意/続行按鈕
+    # payments.amazon.co.jp/checkout/pre-order 上的黃色「続行」按鈕
+    # 排除 id='continue'（次へ進む）和 id='signInSubmit'（ログイン）
+    consent_sel = (
+        "input[name='consentApply'], "
+        "input[value*='続行'][id!='continue'], "
+        "input[value*='同意して'], "
+        "button:has-text('続行'), button:has-text('同意して')"
+    )
+    try:
+        cont = page.locator(consent_sel).first
+        if await cont.count() > 0 and await cont.is_visible(timeout=8_000):
+            log.info(f"[Amazon Pay] 點擊同意/続行，目前頁面：{page.url}")
+            await cont.click()
+            await page.wait_for_timeout(_jitter(3000))
+    except Exception:
+        pass
+
+    return "ok"
 
 
 async def _auto_checkout_product(page, product: dict) -> str:
