@@ -376,14 +376,17 @@ def _send_order_result_email(products: list, checkout_results: dict):
 
 # 加入購物車按鈕的多種候選 selector（從最具體到最寬鬆）
 _CART_BTN_SELECTORS = [
+    # 原生按鈕（需封鎖 Zenlink 才可見）
+    "label.c-product-detail__info-submit-button-primary",
+    "[id*='viwCart'] label",
+    "[class*='submit-button-primary']",
+    # 備援（舊版 input 形式）
+    "button:has-text('カートに入れる')",
     "input[value='カートに入れる']",
     "input[value*='カートに入れ']",
     "input[value*='カートへ']",
     "input[type='button'][name*='CartAdd']",
     "input[type='button'][name*='btnCart']",
-    "input.c-button-em[value*='カート']",
-    "a.c-button-em:has-text('カート')",
-    "button:has-text('カートに入れる')",
 ]
 
 _CHECKOUT_LABEL_1999 = {
@@ -518,6 +521,11 @@ async def _auto_checkout_product(page, product: dict) -> str:
 
     try:
         # ── Step 1：商品頁 ─────────────────────────────────────────────
+        # 封鎖 Zenlink：避免其 JS 隱藏原生「カートに入れる」按鈕
+        async def _block_zenlink(route, request):
+            await route.abort()
+
+        await page.route("**/*zenlink*", _block_zenlink)
         log.info(f"[1999結帳] 開始：{title}")
         await page.goto(product["url"], wait_until="networkidle", timeout=30_000)
         await _wait_cf(page)
@@ -541,6 +549,8 @@ async def _auto_checkout_product(page, product: dict) -> str:
                     break
             except Exception:
                 continue
+
+        await page.unroute("**/*zenlink*")
 
         if not cart_clicked:
             log.warning(f"[1999結帳] 找不到加入購物車按鈕：{title}")
