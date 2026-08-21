@@ -124,17 +124,21 @@ beyblade-funbox-monitor/
 - `navigator.webdriver = undefined`（隱藏自動化特徵）
 - slow_mo 隨機 jitter（±30%）
 
-### SKIP_KEYWORDS（靜默略過清單）
+### SKIP_KEYWORDS（通知但不自動下單）
 
-以下商品名稱關鍵字（`1999_monitor.py` 與 `eslite_monitor.py` 共用同一份清單）出現時，整輪**完全靜默**（不通知、不下單）：
+以下商品名稱關鍵字（`1999_monitor.py` 與 `eslite_monitor.py` 共用同一份清單）出現時，**發通知但跳過自動下單**：
 
-| 關鍵字 | 說明 |
+| 關鍵字 | 備註 |
 |---|---|
-| `BX-43` | 靜默略過 |
-| `BX-25` | 靜默略過 |
-| `BX-11` | 靜默略過 |
+| `BX-11` `BX-25` `BX-26` `BX-33` `BX-43` | BX 系列 |
+| `BXG-29` `BXG-33` | BXG 系列 |
+| `蜘蛛人` `鋼鐵人` `薩諾斯` `綠惡魔` | Marvel 聯名 |
+| `路克天行者` `達斯維達` | Star Wars 聯名 |
+| `暴風天馬` `銀牙烈虎` `烈焰飛鳳` | 其他 |
 
-修改時兩支程式的 `SKIP_KEYWORDS` 清單需一起更新。
+- 1999_monitor：通知受 **1 小時冷卻**限制（同一商品 1 小時內最多通知一次）
+- eslite_monitor：每輪偵測到有庫存即通知（無冷卻）
+- 修改時兩支程式的 `SKIP_KEYWORDS` 清單需一起更新
 
 ### 通知冷卻邏輯
 
@@ -231,8 +235,8 @@ base64 -i 1999_monitor/1999_storage_state.json | pbcopy
 ```
 偵測到有庫存商品
   │
-  ├─ SKIP_KEYWORDS 商品（標題含 BX-43/BX-25/BX-11）→ 完全靜默（不通知、不下單）
-  │     ※ funbox 與 1999 兩支監控共用同一份清單
+  ├─ SKIP_KEYWORDS 商品（標題含 BX-43/BX-25/BX-11/Marvel 聯名/Star Wars 聯名 等）
+  │     → 發通知（1 小時冷卻），跳過自動下單；funbox 與 1999 共用同一份清單
   ├─ SKIP_BUY_KEYWORDS 商品（標題含 BX-33/BX-26/BXG-33/BXG-29/蜘蛛人/暴風天馬/銀牙烈虎/烈焰飛鳳）
   │     → 發通知，跳過自動下單
   │

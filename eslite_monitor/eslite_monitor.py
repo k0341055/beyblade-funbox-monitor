@@ -39,10 +39,18 @@ log = logging.getLogger(__name__)
 # ── 略過通知的商品關鍵字（與 1999_monitor 同步） ──────────────
 # 商品名稱含以下任一關鍵字 → 整輪靜默略過（不通知、不下單）
 SKIP_KEYWORDS: list[str] = [
-    "BX-43",
-    "BX-25",
-    "BX-11",
+    # BX 系列
+    "BX-11", "BX-25", "BX-33", "BX-26", "BX-43",
+    # BXG 系列
+    "BXG-29", "BXG-33",
+    # Marvel 聯名
+    "蜘蛛人", "鋼鐵人", "薩諾斯", "綠惡魔",
+    # Star Wars 聯名
+    "路克天行者", "達斯維達",
+    # 其他
+    "暴風天馬", "銀牙烈虎", "烈焰飛鳳",
 ]
+# SKIP_KEYWORDS 商品行為：發通知，但跳過自動下單
 
 # ─────────────────────────────────────────────
 # 基底類別（共用邏輯）
@@ -665,26 +673,20 @@ class EsliteMonitorBase(ABC):
                 log.info("目前無庫存商品，繼續監控")
                 return True
 
-            # 略過 SKIP_KEYWORDS 商品（不通知、不下單）
-            if SKIP_KEYWORDS:
-                before = len(products)
-                products = [
-                    p for p in products
-                    if not any(kw.upper() in p["title"].upper() for kw in SKIP_KEYWORDS)
-                ]
-                skipped = before - len(products)
-                if skipped:
-                    log.info(f"略過 {skipped} 件符合 SKIP_KEYWORDS 的商品")
-
-            if not products:
-                log.info("所有商品均在 SKIP_KEYWORDS 清單，本輪靜默")
-                return True
-
             log.info(f"發送庫存通知：{len(products)} 件")
             self._notify_products(products)
 
             if self.AUTO_CHECKOUT and self.ESLITE_ACCOUNT:
-                self._attempt_checkout(page, products)
+                # SKIP_KEYWORDS 商品：通知但不自動下單
+                checkout_products = [
+                    p for p in products
+                    if not any(kw.upper() in p["title"].upper() for kw in SKIP_KEYWORDS)
+                ]
+                skipped = len(products) - len(checkout_products)
+                if skipped:
+                    log.info(f"SKIP_KEYWORDS 商品（僅通知，不下單）：{skipped} 件")
+                if checkout_products:
+                    self._attempt_checkout(page, checkout_products)
 
             return True
 

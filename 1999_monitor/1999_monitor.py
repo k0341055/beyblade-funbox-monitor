@@ -60,10 +60,18 @@ NOTIFY_KEYWORD = os.environ.get("PRODUCT_NAME", _extract_keyword(SEARCH_URL))
 # ── 略過通知的商品關鍵字 ──────────────────────────────
 # 商品名稱含以下任一關鍵字 → 整輪靜默略過（不通知）
 SKIP_KEYWORDS: list[str] = [
-    "BX-43",
-    "BX-25",
-    "BX-11",
+    # BX 系列
+    "BX-11", "BX-25", "BX-33", "BX-26", "BX-43",
+    # BXG 系列
+    "BXG-29", "BXG-33",
+    # Marvel 聯名
+    "蜘蛛人", "鋼鐵人", "薩諾斯", "綠惡魔",
+    # Star Wars 聯名
+    "路克天行者", "達斯維達",
+    # 其他
+    "暴風天馬", "銀牙烈虎", "烈焰飛鳳",
 ]
+# SKIP_KEYWORDS 商品行為：發通知（1 小時冷卻），但跳過自動下單
 
 # ── 自動下單設定 ──────────────────────────────────────
 AUTO_CHECKOUT = os.environ.get("AUTO_CHECKOUT", "false").lower() == "true"
@@ -648,16 +656,14 @@ async def check_once(page, context=None) -> bool:
         if not products:
             return False
 
-        # 略過 SKIP_KEYWORDS 商品（不通知）
+        # SKIP_KEYWORDS 商品：發通知（1 小時冷卻），但不自動下單
+        skip_hrefs: set = set()
         if SKIP_KEYWORDS:
-            before = len(products)
-            products = [
-                p for p in products
-                if not any(kw.upper() in p["title"].upper() for kw in SKIP_KEYWORDS)
-            ]
-            skipped = before - len(products)
-            if skipped:
-                log.info(f"略過 {skipped} 件符合 SKIP_KEYWORDS 的商品")
+            for p in products:
+                if any(kw.upper() in p["title"].upper() for kw in SKIP_KEYWORDS):
+                    skip_hrefs.add(p["href"])
+            if skip_hrefs:
+                log.info(f"SKIP_KEYWORDS 商品（僅通知，不下單）：{len(skip_hrefs)} 件")
 
         if not products:
             return False
@@ -682,7 +688,11 @@ async def check_once(page, context=None) -> bool:
 
             if AUTO_CHECKOUT:
                 purchased = load_order_state()
-                to_checkout = [p for p in to_notify if p["href"] not in purchased]
+                to_checkout = [
+                    p for p in to_notify
+                    if p["href"] not in purchased
+                    and p["href"] not in skip_hrefs
+                ]
                 if not to_checkout:
                     log.info("所有可通知商品均已下單過，跳過下單")
                 else:
