@@ -62,6 +62,7 @@ NOTIFY_KEYWORD = os.environ.get("PRODUCT_NAME", _extract_keyword(SEARCH_URL))
 SKIP_KEYWORDS: list[str] = [
     "BX-43",
     "BX-25",
+    "BX-11",
 ]
 
 # ── 自動下單設定 ──────────────────────────────────────
@@ -533,7 +534,7 @@ async def _auto_checkout_product(page, product: dict) -> str:
         for sel in _CART_BTN_SELECTORS:
             try:
                 loc = page.locator(sel).first
-                if loc.count() > 0 and await loc.is_visible():
+                if await loc.count() > 0 and await loc.is_visible():
                     await loc.click()
                     cart_clicked = True
                     log.info(f"[1999結帳] ⏱ 加入購物車（{_t.perf_counter()-t0:.2f}s）：{title}")
@@ -558,7 +559,7 @@ async def _auto_checkout_product(page, product: dict) -> str:
 
         # ── Step 4：Amazon Pay 按鈕 ────────────────────────────────────
         apay = page.locator(".amazonpay-button-view1, .amazonpay-button-logo").first
-        if apay.count() == 0 or not await apay.is_visible():
+        if await apay.count() == 0 or not await apay.is_visible():
             log.warning("[1999結帳] 找不到 Amazon Pay 按鈕")
             return "no_amazon_pay"
 
