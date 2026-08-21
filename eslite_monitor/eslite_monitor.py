@@ -18,6 +18,7 @@ import smtplib
 import time
 import urllib.parse
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -861,29 +862,36 @@ def _parse_holmes_response(eslite_base: str, raw: str) -> list:
         return []
 
     log.info(f"Holmes 搜尋 API 取得 {len(items)} 筆結果")
-    if items:
-        log.info(f"holmes first data: {json.dumps(items[0], ensure_ascii=False)}")
     result = []
     for item in items:
         if not isinstance(item, dict):
             continue
-        guid = str(item.get("product_guid") or item.get("guid") or "").strip()
+        # Holmes 使用 "id"，展覽 API 使用 "product_guid"
+        guid = str(item.get("id") or item.get("product_guid") or item.get("guid") or "").strip()
         name = item.get("name", "").strip()
         if not guid or not name:
             continue
+        # Holmes 使用 availability 字串，不回傳數值庫存
+        availability = item.get("availability", "")
         try:
             stock = int(item.get("stock") or 0)
         except (TypeError, ValueError):
             stock = 0
-        btn_status = (item.get("product_button_status") or item.get("status") or "").strip()
-        in_stock = (stock > 0) or (btn_status == "add_to_shopping_cart")
+        if stock == 0 and availability == "IN_STOCK":
+            stock = 1  # Holmes 不回傳數量，有貨時設為 1
+        # Holmes 使用 "button_status"，展覽 API 使用 "product_button_status"
+        btn_status = (
+            item.get("button_status") or item.get("product_button_status") or
+            item.get("status") or ""
+        ).strip()
+        in_stock = (stock > 0) or (availability == "IN_STOCK") or (btn_status == "add_to_shopping_cart")
         if not in_stock:
             continue
 
         acct_lim = item.get("account_qty_limit")
         ord_lim  = item.get("order_qty_limit")
         lim = f"帳號上限:{acct_lim}件" if acct_lim else "無限購"
-        log.info(f"有庫存（搜尋）→ {name}（{guid}）| 庫存:{stock} 件 | {lim} | {btn_status}")
+        log.info(f"有庫存（搜尋）→ {name}（{guid}）| availability:{availability} | {lim} | {btn_status}")
         result.append({
             "guid": guid,
             "name": name,
@@ -960,30 +968,58 @@ class CombinedMonitor(ExhibitionMonitor):
         return _parse_holmes_response(self.ESLITE_BASE, raw)
 
     def fetch_in_stock_products(self, page) -> list:
-        products: dict = {}
+        browser = page.context.browser
 
-        # ① 展覽 API（可選，失敗不中斷）
-        if self.API_URL:
+        def _make_ctx():
+            ctx = browser.new_context(user_agent=self._UA)
+            ctx.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+            return ctx
+
+        def _run_exhibition():
+            if not self.API_URL:
+                return []
+            ctx = _make_ctx()
             try:
-                for p in self._fetch_exhibition(page):
-                    products[p["guid"]] = p
-                log.info(f"展覽 API 貢獻 {len(products)} 件")
+                return self._fetch_exhibition(ctx.new_page())
             except Exception as e:
-                log.warning(f"展覽 API 失敗（{e}），跳過，繼續關鍵字搜尋")
+                log.warning(f"展覽 API 失敗（{e}），跳過")
+                return []
+            finally:
+                ctx.close()
+
+        def _run_search():
+            ctx = _make_ctx()
+            try:
+                return self._fetch_keyword_search(ctx.new_page())
+            except Exception as e:
+                log.error(f"關鍵字搜尋失敗：{e}")
+                return []
+            finally:
+                ctx.close()
+
+        # 展覽 API 與關鍵字搜尋平行執行
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_exhibition = executor.submit(_run_exhibition)
+            future_search     = executor.submit(_run_search)
+            exhibition_results = future_exhibition.result()
+            search_results     = future_search.result()
+
+        products: dict = {}
+        for p in exhibition_results:
+            products[p["guid"]] = p
+        if self.API_URL:
+            log.info(f"展覽 API 貢獻 {len(exhibition_results)} 件")
         else:
             log.info("ESLITE_API_URL 未設定，跳過展覽 API")
 
-        # ② 關鍵字搜尋（去重加入）
-        try:
-            search_results = self._fetch_keyword_search(page)
-            before = len(products)
-            for p in search_results:
-                if p["guid"] not in products:
-                    products[p["guid"]] = p
-            added = len(products) - before
-            log.info(f"關鍵字搜尋貢獻 {added} 件（去重後，總計 {len(products)} 件）")
-        except Exception as e:
-            log.error(f"關鍵字搜尋失敗：{e}")
+        before = len(products)
+        for p in search_results:
+            if p["guid"] not in products:
+                products[p["guid"]] = p
+        added = len(products) - before
+        log.info(f"關鍵字搜尋貢獻 {added} 件（去重後，總計 {len(products)} 件）")
 
         return list(products.values())
 
