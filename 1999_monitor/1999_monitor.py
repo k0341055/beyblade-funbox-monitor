@@ -466,31 +466,35 @@ async def _handle_amazon_auth(page) -> str:
             log.warning("[Amazon Pay] 找不到登入按鈕")
             return "amazon_auth_needed"
         await signin_btn.click()
-        # 等待頁面導到 payments.amazon.co.jp（授權確認頁）
-        await page.wait_for_load_state("domcontentloaded", timeout=15_000)
-        await page.wait_for_timeout(_jitter(2000))
-
-        if "amazon.co.jp/ap/signin" in page.url:
-            log.warning("[Amazon Pay] 登入後仍停在 signin 頁（OTP 驗證或帳密錯誤）")
+        # 等待真正離開 /ap/signin（預留 45 秒處理 CAPTCHA / 新裝置驗證）
+        try:
+            await page.wait_for_function(
+                "() => !window.location.href.includes('/ap/signin')",
+                timeout=45_000,
+            )
+        except PlaywrightTimeoutError:
+            log.warning(f"[Amazon Pay] 登入後仍停在 signin 頁，URL：{page.url}")
             return "amazon_auth_needed"
 
+        # 等到完全離開 redirectView（networkidle 讓過渡頁完成跳轉）
+        await page.wait_for_load_state("networkidle", timeout=20_000)
         log.info(f"[Amazon Pay] 帳密登入成功，目前頁面：{page.url}")
 
-    # ② 已登入（或登入後）→ 偵測同意/続行按鈕
-    # payments.amazon.co.jp/checkout/pre-order 上的黃色「続行」按鈕
-    # 排除 id='continue'（次へ進む）和 id='signInSubmit'（ログイン）
+    # ② 已登入（或登入後）→ 等待並點同意/続行
+    # payments.amazon.co.jp 的黃色 続行 可能是 div[role='button']
     consent_sel = (
         "input[name='consentApply'], "
-        "input[value*='続行'][id!='continue'], "
+        "input[value*='続行']:not(#continue), "
         "input[value*='同意して'], "
-        "button:has-text('続行'), button:has-text('同意して')"
+        "button:has-text('続行'), button:has-text('同意して'), "
+        "[role='button']:has-text('続行'), [role='button']:has-text('同意して')"
     )
     try:
         cont = page.locator(consent_sel).first
-        if await cont.count() > 0 and await cont.is_visible(timeout=8_000):
-            log.info(f"[Amazon Pay] 點擊同意/続行，目前頁面：{page.url}")
-            await cont.click()
-            await page.wait_for_timeout(_jitter(3000))
+        await cont.wait_for(state="visible", timeout=12_000)
+        log.info(f"[Amazon Pay] 點擊同意/続行，目前頁面：{page.url}")
+        await cont.click()
+        await page.wait_for_timeout(_jitter(3000))
     except Exception:
         pass
 
@@ -606,7 +610,7 @@ async def _auto_checkout_product(page, product: dict) -> str:
 
         # ── Step 6：確認下單 ───────────────────────────────────────────
         confirm = page.locator("#btnSendRight, input[name*='btnSendRight']").first
-        if confirm.count() == 0 or not await confirm.is_visible():
+        if await confirm.count() == 0 or not await confirm.is_visible():
             log.warning("[1999結帳] 找不到確認下單按鈕")
             return "no_confirm_button"
 
