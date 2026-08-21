@@ -89,7 +89,7 @@ jobs:
           ESLITE_SEARCH_URL:       ${{ vars.ESLITE_SEARCH_URL }}
           ESLITE_PURCHASED_NAMES:  ${{ secrets.ESLITE_PURCHASED_NAMES }}
           MONITOR_KEYWORDS:        ${{ vars.MONITOR_KEYWORDS }}
-          AUTO_CHECKOUT:           'false'
+          AUTO_CHECKOUT:           'true'
           HEADLESS:             'true'
           MONITOR_MODE:         ${{ inputs.monitor_mode || 'combined' }}
           CHECK_ROUNDS:         ${{ inputs.check_rounds || '50' }}
