@@ -223,13 +223,13 @@ base64 -i 1999_monitor/1999_storage_state.json | pbcopy
   │
   └─ 一般商品 → 依 CHECKOUT_MODE 決定策略（YML 參數控制）
         │
-        ├─ [sequential 模式，預設] 帳號間平行，每帳號登入一次後逐件商品依序執行：
+        ├─ [sequential 模式] 帳號間平行，每帳號登入一次後逐件商品依序執行：
         │     ├─ 商品排序：PRIORITY_KEYWORDS 最優先 → 購買次數少的優先（自然輪替）
         │     ├─ POST /cart/clear.js（清空購物車）
         │     ├─ POST /cart/add（加入 1 件，抽抽包/隨機強化組加 3 件）
         │     └─ Playwright 開啟 /cart → 立即結帳
         │
-        └─ [parallel 模式] 每個（帳號 × 商品）各自獨立 thread 登入後立即結帳
+        └─ [parallel 模式，預設] 每個（帳號 × 商品）各自獨立 thread 登入後立即結帳
               ├─ 商品排序同 sequential（PRIORITY 優先 → 購買次數少優先）
               └─ 最大並發數：PARALLEL_CHECKOUT_LIMIT（預設 6，避免被限流）
               │
@@ -580,8 +580,8 @@ ESLITE_EVENT_URL={設定於 GitHub Variable ESLITE_EVENT_URL}
 |---|---|---|
 | `SEARCH_URL` | GitHub Variable `FUNBOX_SEARCH_URL` | 監控目標（可改為任意 Cyberbiz 集合 URL） |
 | `CHECK_ROUNDS` | `1`（本機預設） | 執行輪數（GitHub Actions 設為 60） |
-| `CHECKOUT_MODE` | YML input，預設 `sequential` | `sequential`：帳號平行、每帳號商品逐件；`parallel`：帳號×商品全平行 |
-| `PARALLEL_CHECKOUT_LIMIT` | `6`（YML 硬寫） | parallel 模式最大並發 thread 數 |
+| `CHECKOUT_MODE` | YML input，預設 `parallel` | `parallel`：帳號×商品全平行（預設）；`sequential`：帳號平行、每帳號商品逐件 |
+| `PARALLEL_CHECKOUT_LIMIT` | YML input，預設 `6` | parallel 模式最大並發 thread 數（可於觸發 workflow 時調整） |
 | `PRIORITY_KEYWORDS` | 空（選填 env） | 逗號分隔關鍵字，符合商品永遠排最前面（不管購買次數） |
 | `MAX_BUY_PRODUCTS` | `0`（無限制） | 限制本次最多購買幾件（0 = 不限，測試用） |
 | `TEST_MODE` | `0` | 設為 `1` 時 email 主旨加【測試】標注 |
