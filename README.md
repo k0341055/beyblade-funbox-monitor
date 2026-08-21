@@ -24,17 +24,19 @@ flowchart TD
 
     GA1 --> PW1["Playwright async\n15 輪 / 次（約 2 分鐘）\n隨機 UA + viewport"]
     GA2 --> REQ["requests.Session 登入/加購\n+ Playwright 結帳\n50 輪 / 次（約 4 分鐘）\n連續 3 輪失敗 → 提早結束"]
-    GA3 --> PW3["ExhibitionMonitor\nPlaywright sync\n50 輪 / 次（約 5 分鐘）\n監控 context 匿名"]
+    GA3 --> PW3["CombinedMonitor（預設）\nPlaywright sync + ThreadPoolExecutor\n50 輪 / 次（約 5 分鐘）\n監控 context 匿名"]
     GA4 --> PW4["ProductMonitor\nPlaywright sync\n35 輪 / 次（約 3.5 分鐘）\n監控 context 匿名"]
 
     PW1 --> SITE1["1999.co.jp\nBeyblade X 搜尋頁\nCloudflare 保護"]
     REQ --> SITE2["shop.funbox.com.tw\nCyberbiz /products.json API"]
-    PW3 --> SITE3["athena.eslite.com\nbook_exhibits API\nCloudflare 保護"]
+    PW3 -->|平行 BrowserContext| SITE3A["athena.eslite.com\nbook_exhibits API\nCloudflare 保護"]
+    PW3 -->|平行 BrowserContext| SITE3B["holmes.eslite.com\nHolmes 搜尋 API\nCloudflare 保護"]
     PW4 --> SITE4["athena.eslite.com\nproducts/{guid} API\n個別商品庫存"]
 
     SITE1 --> COOL1["1 小時冷卻\nseen_products.json"]
     SITE2 --> COOL2["1 小時冷卻\nseen_products.json"]
-    SITE3 --> NOCD["無冷卻\n每輪有庫存即通知"]
+    SITE3A --> NOCD["無冷卻\n每輪有庫存即通知\n（guid 去重，書展優先）"]
+    SITE3B --> NOCD
     SITE4 --> NOCD
 
     COOL1 -->|新商品 / 到期| MAIL1["Gmail → 全體收件人"]
@@ -86,7 +88,7 @@ beyblade-funbox-monitor/
 | 目標網站 | `1999.co.jp` | `shop.funbox.com.tw` | `eslite.com` | `eslite.com` |
 | 偵測商品 | Beyblade X 系列 | 戰鬥陀螺集合頁 | Beyblade X 書展 API | `ESLITE_EXTRA_PRODUCTS` GUID 清單 |
 | 反爬蟲機制 | Cloudflare（隨機 UA/viewport/locale） | Cyberbiz `/products.json`（無反爬） | Cloudflare（Playwright 繞過） | Cloudflare（Playwright 繞過） |
-| 技術架構 | Playwright async | requests 登入/加購 + Playwright 結帳 | `ExhibitionMonitor`（OOP，Playwright sync） | `ProductMonitor`（OOP，Playwright sync） |
+| 技術架構 | Playwright async | requests 登入/加購 + Playwright 結帳 | `CombinedMonitor`（OOP，Playwright sync + ThreadPoolExecutor 平行抓取，預設） | `ProductMonitor`（OOP，Playwright sync） |
 | 每次執行輪數 | **15 輪**（間隔 5~8 秒） | **60 輪**（間隔 3~5 秒） | **50 輪**（間隔 3~5 秒） | **35 輪**（間隔 3~5 秒） |
 | 執行時長 / timeout | ~2 分鐘 / 25 min | ~5 分鐘 / 25 min | ~5 分鐘 / 25 min | ~3.5 分鐘 / 25 min |
 | 通知冷卻 | 1 小時冷卻 | 1 小時冷卻 | **無冷卻（每輪有庫存即通知）** | **無冷卻（每輪有庫存即通知）** |
@@ -307,18 +309,28 @@ base64 -i 1999_monitor/1999_storage_state.json | pbcopy
 EsliteMonitorBase (ABC)
   ├─ 共用：登入、購物車、結帳、Email 通知、session 持久化、下單去重
   │
-  ├─ ExhibitionMonitor（MONITOR_MODE=exhibition，預設）
+  ├─ ExhibitionMonitor（MONITOR_MODE=exhibition）
   │     └─ 呼叫 book_exhibits API → 遞迴解析書展 JSON → ~6 秒/輪 → 50 輪/次
+  │
+  ├─ KeywordSearchMonitor（MONITOR_MODE=keyword）
+  │     └─ 呼叫 Holmes 搜尋 API → 解析 id/availability/button_status → ~6 秒/輪
+  │
+  ├─ CombinedMonitor（MONITOR_MODE=combined，eslite_monitor.yml 預設）
+  │     ├─ 繼承自 ExhibitionMonitor（共用 _fetch_exhibition）
+  │     └─ ThreadPoolExecutor(max_workers=2) 平行執行
+  │           ├─ _fetch_exhibition()（書展 API，ESLITE_API_URL 未設定則跳過）
+  │           └─ _fetch_keyword_search()（Holmes API）
+  │           → 結果以 guid 去重合併，書展 API 資料優先
   │
   └─ ProductMonitor（MONITOR_MODE=product）
         └─ 逐一呼叫 products/{guid} API → ~6 秒/輪 → 35 輪/次
 ```
 
-兩個模式分別由獨立 GitHub Actions workflow 觸發，各使用獨立的 `ORDER_STATE_FILE`（避免下單狀態互相干擾）：
+各模式分別由獨立 GitHub Actions workflow 觸發，各使用獨立的 `ORDER_STATE_FILE`（避免下單狀態互相干擾）：
 
-| Workflow | MONITOR_MODE | CHECK_ROUNDS | ORDER_STATE_FILE |
+| Workflow | MONITOR_MODE（預設） | CHECK_ROUNDS | ORDER_STATE_FILE |
 |---|---|---|---|
-| `eslite_monitor.yml` | `exhibition` | 50 | `eslite_order_state.json` |
+| `eslite_monitor.yml` | `combined` | 50 | `eslite_order_state.json` |
 | `eslite_product_monitor.yml` | `product` | 35 | `eslite_product_order_state.json` |
 
 兩個 workflow 共用同一個 `eslite_storage_state.json`（session），以 `eslite-session-` cache key 共享。
@@ -329,20 +341,44 @@ EsliteMonitorBase (ABC)
 
 使用 Playwright 開啟 `athena.eslite.com/api/v1/book_exhibits/{EXHIBITION_ID}`（繞過 Cloudflare），對 JSON 回應進行**遞迴解析**，不限巢狀深度找出所有含 `product_guid` + `name` 的節點。每輪只呼叫一次 API，約 6 秒。
 
-**ProductMonitor（個別商品）**
-
-對 `ESLITE_EXTRA_PRODUCTS` 列出的 GUID，逐一呼叫 `athena.eslite.com/api/v1/products/{guid}` 查詢庫存狀態。
-
-解析欄位：
+書展 API 解析欄位：
 
 | 欄位 | 說明 |
 |---|---|
-| `stock` | 庫存數量 |
+| `product_guid` | 商品 ID |
+| `stock` | 庫存數量（數值） |
 | `account_qty_limit` | 帳號購買上限（`null` = 無限制） |
 | `order_qty_limit` | 每單購買上限（`null` = 無限制） |
 | `product_button_status` | `add_to_shopping_cart` 表示可購買 |
 
-庫存判斷：`stock > 0`（書展 API）或 `product_button_status == "add_to_shopping_cart"`（個別商品 API）。部分陳列商品（如 UX-14）雖然出現在書展 API 中，但 `stock = 0`，會被庫存過濾自然排除，無需另設關鍵字黑名單。
+**CombinedMonitor（合併監控，eslite_monitor.yml 預設）**
+
+以 `ThreadPoolExecutor(max_workers=2)` 平行啟動兩個獨立 `BrowserContext`，同時抓取書展 API 與 Holmes 搜尋 API，最後以 `guid` 去重合併（書展 API 資料優先）：
+
+| 來源 | API 端點 | 有庫存判斷 |
+|---|---|---|
+| 書展 API | `athena.eslite.com/api/v1/book_exhibits/...` | `stock > 0` |
+| Holmes 搜尋 API | `holmes.eslite.com/v1/search?...` | `availability == "IN_STOCK"` |
+
+Holmes API 欄位格式（與書展 API 不同，解析時分別處理）：
+
+| Holmes 欄位 | 說明 | 對應書展欄位 |
+|---|---|---|
+| `id` | 商品 ID | `product_guid` |
+| `availability` | `"IN_STOCK"` = 有貨（字串，無數量） | `stock`（數值） |
+| `button_status` | `"add_to_shopping_cart"` = 可購買 | `product_button_status` |
+
+Holmes API 不回傳庫存數量，`availability == "IN_STOCK"` 時內部設 `stock = 1`，下單數量由 `account_qty_limit` / `order_qty_limit` 決定。
+
+**KeywordSearchMonitor（MONITOR_MODE=keyword）**
+
+單獨執行 Holmes 搜尋 API，不含書展 API，適用於書展已下架但關鍵字仍有商品的情境。
+
+**ProductMonitor（個別商品）**
+
+對 `ESLITE_EXTRA_PRODUCTS` 列出的 GUID，逐一呼叫 `athena.eslite.com/api/v1/products/{guid}` 查詢庫存狀態。庫存判斷：`stock > 0` 或 `product_button_status == "add_to_shopping_cart"`。
+
+部分陳列商品（如 UX-14）雖出現在書展 API 中，但 `stock = 0`，會被庫存過濾自然排除，無需另設關鍵字黑名單。
 
 ### 通知邏輯（無冷卻）
 
