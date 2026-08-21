@@ -94,7 +94,7 @@ jobs:
           SEARCH_URL:        ${{ vars.SEARCH_URL_1999 }}
           CHECK_ROUNDS:      ${{ inputs.check_rounds || '15' }}
           STATE_FILE:        'seen_products.json'
-          AUTO_CHECKOUT:     ${{ inputs.auto_checkout || 'false' }}
+          AUTO_CHECKOUT:     ${{ inputs.auto_checkout || 'true' }}
           ACCOUNT_1999:      ${{ secrets.ACCOUNT_1999 }}
           PASSWORD_1999:     ${{ secrets.PASSWORD_1999 }}
           AMAZON_ACCOUNT:    ${{ secrets.AMAZON_ACCOUNT }}
