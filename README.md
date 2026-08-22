@@ -145,12 +145,28 @@ beyblade-funbox-monitor/
 - 同款商品 **1 小時內最多通知一次**（`seen_products.json` 記錄上次通知時間）
 - 商品下架 → 當輪從 `seen_products` 移除 → 重新上架視為全新，立即通知
 
+### BUY_KEYWORDS（自動下單目標清單，僅 1999_monitor）
+
+只有商品名稱符合以下關鍵字的商品才會自動下單，其餘僅通知：
+
+| 關鍵字 | 備註 |
+|---|---|
+| `BX-09` `BX-23` `BX-29` `BX-30` `BX-35` `BX-42` `BX-48` | BX 目標系列 |
+| `ドラグーンストーム` | BX-00 ブースター ドラグーンストーム4-60RA（BX-00 系列僅此款） |
+| `UX-01` `UX-03` `UX-11` `UX-15` `UX-17` `UX-20` | UX 系列 |
+| `CX-08` `CX-18` | CX 系列 |
+
+> 優先級：`SKIP_KEYWORDS` > `BUY_KEYWORDS`（在 SKIP 清單的商品即使符合 BUY 也不下單）
+
 ### 自動下單流程（Amazon Pay）
 
 ```
 偵測到需通知的有庫存商品（AUTO_CHECKOUT=true）
   │
-  └─ Playwright（含預存 Amazon session）
+  ├─ SKIP_KEYWORDS 符合 → 通知（1 小時冷卻），不下單
+  ├─ BUY_KEYWORDS 不符合 → 通知（1 小時冷卻），不下單
+  │
+  └─ BUY_KEYWORDS 符合 + 未曾下單 → Playwright 自動下單
         │
         ├─ ① 批次加入購物車（wait_until=load，速度最佳化）
         │     對每件商品：商品頁 → 封鎖 Zenlink → 點擊「カートに入れる」

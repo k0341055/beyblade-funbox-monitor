@@ -73,6 +73,16 @@ SKIP_KEYWORDS: list[str] = [
 ]
 # SKIP_KEYWORDS 商品行為：發通知（1 小時冷卻），但跳過自動下單
 
+# ── 自動下單目標商品關鍵字（白名單）─────────────────────
+# 商品名稱含以下任一關鍵字 → 發通知 + 自動下單
+# 不在此清單且不在 SKIP_KEYWORDS → 僅發通知，不下單
+BUY_KEYWORDS: list[str] = [
+    "BX-09", "BX-23", "BX-29", "BX-30", "BX-35", "BX-42", "BX-48",
+    "ドラグーンストーム",   # BX-00 ブースター ドラグーンストーム4-60RA
+    "UX-01", "UX-03", "UX-11", "UX-15", "UX-17", "UX-20",
+    "CX-08", "CX-18",
+]
+
 # ── 自動下單設定 ──────────────────────────────────────
 AUTO_CHECKOUT = os.environ.get("AUTO_CHECKOUT", "false").lower() == "true"
 ACCOUNT_1999 = os.environ.get("ACCOUNT_1999", "").strip()
@@ -690,6 +700,7 @@ async def check_once(page, context=None) -> bool:
                     p for p in to_notify
                     if p["href"] not in purchased
                     and p["href"] not in skip_hrefs
+                    and any(kw.upper() in p["title"].upper() for kw in BUY_KEYWORDS)
                 ]
                 if not to_checkout:
                     log.info("所有可通知商品均已下單過，跳過下單")
