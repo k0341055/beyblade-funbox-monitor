@@ -297,23 +297,24 @@ base64 -i 1999_monitor/1999_storage_state.json | pbcopy
 ```
 偵測到有庫存商品
   │
-  ├─ SKIP_KEYWORDS 商品（標題含 BX-43/BX-25/BX-11/Marvel 聯名/Star Wars 聯名 等）
-  │     → 發通知（1 小時冷卻），跳過自動下單；funbox 與 1999 共用同一份清單
+  ├─ SKIP_KEYWORDS 商品（標題含 "APP"）
+  │     → 完全靜默，不通知、不下單
   ├─ SKIP_BUY_KEYWORDS 商品（BXG-04/銀牙烈虎/BX-33/BX-26/BXG-33/BXG-29/BXG-20/蜘蛛人/暴風天馬/烈焰飛鳳）
-  │     → 發通知，跳過自動下單
-  ├─ BUY_KEYWORDS 不符合 → 發通知，跳過自動下單
+  │     → 發通知（1 小時冷卻），跳過自動下單
+  ├─ BUY_KEYWORDS 不符合 → 發通知（1 小時冷卻），跳過自動下單
   │
-  └─ BUY_KEYWORDS 符合 → 依 CHECKOUT_MODE 決定策略（YML 參數控制）
+  └─ BUY_KEYWORDS 符合（FUNBOX_EMAIL 帳號有設定即自動下單，無獨立開關）
+        └─ 依 CHECKOUT_MODE 決定策略（YML 參數控制）
         │
-        ├─ [sequential 模式] 帳號間平行，每帳號登入一次後逐件商品依序執行：
-        │     ├─ 商品排序：PRIORITY_KEYWORDS 最優先 → 購買次數少的優先（自然輪替）
+        ├─ [sequential 模式] 帳號間平行，每帳號登入一次後逐件商品依序結帳
+        │     ├─ 商品排序：購買次數少的優先（自然輪替）
         │     ├─ POST /cart/clear.js（清空購物車）
         │     ├─ POST /cart/add（加入 1 件，抽抽包/隨機強化組加 3 件）
         │     └─ Playwright 開啟 /cart → 立即結帳
         │
-        └─ [parallel 模式，預設] 每個（帳號 × 商品）各自獨立 thread 登入後立即結帳
-              ├─ 商品排序同 sequential（PRIORITY 優先 → 購買次數少優先）
-              └─ 最大並發數：PARALLEL_CHECKOUT_LIMIT（預設 6，避免被限流）
+        └─ [parallel 模式，預設] 每個（帳號 × 商品）各自獨立 thread，各自登入後立即結帳
+              ├─ 商品排序同 sequential（購買次數少優先）
+              ├─ 最大並發數：PARALLEL_CHECKOUT_LIMIT（預設 6，避免記憶體或被限流）
               │
               └─ Playwright 結帳 SPA（兩個模式共用）
                     ├─ 確認結帳頁為 /carts/{token}（session 驗證）
@@ -335,7 +336,7 @@ base64 -i 1999_monitor/1999_storage_state.json | pbcopy
 
 每輪下單前，程式依以下規則決定每個帳號的購買順序：
 
-1. **PRIORITY_KEYWORDS**（程式碼設定）：符合關鍵字的商品永遠排最前面，不管已購幾次
+1. **BUY_KEYWORDS 順序**（程式碼設定）：僅白名單內的商品才進入下單流程
 2. **購買次數少優先**：`purchased[href][email]` 計數越低的商品越先買，確保每件商品都有機會被買到
 3. **連續失敗 ≥ 10 次**：自動跳過該（帳號 × 商品）組合，成功後歸零重計
 
