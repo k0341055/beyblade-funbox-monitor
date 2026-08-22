@@ -23,7 +23,7 @@ flowchart TD
     CRON -->|workflow_dispatch| GA4["GitHub Actions\neslite_product_monitor\nubuntu VM"]
 
     GA1 --> PW1["Playwright async\n30 輪 / 次（約 5 分鐘）\n隨機 UA + viewport"]
-    GA2 --> REQ["requests.Session 登入/加購\n+ Playwright 結帳\n50 輪 / 次（約 4 分鐘）\n連續 3 輪失敗 → 提早結束"]
+    GA2 --> REQ["requests.Session 登入/加購\n+ Playwright 結帳\n60 輪 / 次（約 5 分鐘）\n連續 3 輪失敗 → 提早結束"]
     GA3 --> PW3["CombinedMonitor（預設）\nPlaywright sync + ThreadPoolExecutor\n50 輪 / 次（約 5 分鐘）\n監控 context 匿名"]
     GA4 --> PW4["ProductMonitor\nPlaywright sync\n35 輪 / 次（約 3.5 分鐘）\n監控 context 匿名"]
 
@@ -41,7 +41,7 @@ flowchart TD
 
     COOL1 -->|新商品 / 到期| MAIL1["Gmail → 全體收件人"]
     COOL1 -->|同輪觸發\nAUTO_CHECKOUT=true| BUY1["Amazon Pay 自動下單\n加入購物車 → /order\n→ Amazon Pay OAuth\n→ /orderamazon 確認"]
-    COOL2 -->|新商品 / 到期| MAIL2["Gmail → 全體收件人"]
+    COOL2 -->|新商品 / 到期| MAIL2["Gmail 上架通知 → 全體收件人（立即）\nGmail 結帳結果 → 各下單帳號（結帳後）"]
     NOCD --> MAIL3["Gmail → 全體收件人\n含一鍵結帳連結"]
 
     COOL2 -->|同輪觸發| BUY["多帳號下單\nCHECKOUT_MODE 決定策略\nsequential / parallel"]
@@ -68,7 +68,9 @@ beyblade-funbox-monitor/
 │       ├── eslite_monitor.yml            # 誠品書展監控 workflow（MONITOR_MODE=exhibition）
 │       └── eslite_product_monitor.yml    # 誠品個別商品監控 workflow（MONITOR_MODE=product）
 ├── 1999_monitor/
-│   ├── 1999_monitor.py             # 主程式（Playwright async，僅通知）
+│   ├── 1999_monitor.py             # 主程式（Playwright async + Amazon Pay 自動下單）
+│   ├── generate_1999_session.py    # 一次性工具：手動登入並儲存 Amazon Pay session
+│   ├── refresh_session.py          # 自動刷新 session 並上傳至 GitHub Secret
 │   └── requirements.txt
 ├── funbox_monitor/
 │   ├── funbox_monitor.py           # 主程式（requests + Playwright 混合）
@@ -124,34 +126,37 @@ beyblade-funbox-monitor/
 - `navigator.webdriver = undefined`（隱藏自動化特徵）
 - slow_mo 隨機 jitter（±30%）
 
-### SKIP_KEYWORDS（通知但不自動下單）
+### NOT_NOTIFY_KEYWORDS（完全靜默，1999_monitor）
 
-以下商品名稱關鍵字（`1999_monitor.py` 與 `eslite_monitor.py` 共用同一份清單）出現時，**發通知但跳過自動下單**：
+以下商品**完全不通知、不下單**（比 SKIP_KEYWORDS 更嚴格）：
 
 | 關鍵字 | 備註 |
 |---|---|
-| `BX-11` `BX-25` `BX-26` `BX-33` `BX-43` | BX 系列 |
-| `BXG-29` `BXG-33` | BXG 系列 |
-| `蜘蛛人` `鋼鐵人` `薩諾斯` `綠惡魔` | Marvel 聯名 |
-| `路克天行者` `達斯維達` | Star Wars 聯名 |
-| `暴風天馬` `銀牙烈虎` `烈焰飛鳳` | 其他 |
+| `BX-43` | 不感興趣，完全忽略 |
+
+### SKIP_KEYWORDS（通知但不自動下單）
+
+以下商品名稱關鍵字出現時，**發通知但跳過自動下單**：
+
+| 關鍵字 | 1999_monitor | eslite_monitor |
+|---|---|---|
+| `BX-11` `BX-25` `BX-26` `BX-33` | ✓ | ✓ |
+| `BXG-29` `BXG-33` | ✓ | ✓ |
+| `蜘蛛人` `鋼鐵人` `薩諾斯` `綠惡魔` | ✓ | ✓ |
+| `路克天行者` `達斯維達` | ✓ | ✓ |
+| `暴風天馬` `銀牙烈虎` `烈焰飛鳳` | ✓ | ✓ |
 
 - 1999_monitor：通知受 **1 小時冷卻**限制（同一商品 1 小時內最多通知一次）
 - eslite_monitor：每輪偵測到有庫存即通知（無冷卻）
-- 修改時兩支程式的 `SKIP_KEYWORDS` 清單需一起更新
 
 ### 通知冷卻邏輯
 
 - 同款商品 **1 小時內最多通知一次**（`seen_products.json` 記錄上次通知時間）
 - 商品下架 → 當輪從 `seen_products` 移除 → 重新上架視為全新，立即通知
 
-### BUY_KEYWORDS（自動下單目標清單，僅 1999_monitor）
+### BUY_KEYWORDS（自動下單目標清單，1999_monitor）
 
-只有商品名稱符合以下關鍵字的商品才會自動下單，其餘僅通知：
-
-| 關鍵字 | 備註 |
-|---|---|
-依志願優先順序排列：
+只有商品名稱符合以下關鍵字的商品才會自動下單，其餘僅通知。依志願優先順序排列：
 
 | 順序 | 關鍵字 | 備註 |
 |---|---|---|
@@ -168,7 +173,7 @@ beyblade-funbox-monitor/
 | 20 | `ドラシエルシールド` | BX-00 ブースター ドラシエルシールド7-60D |
 | 21–23 | `BX-42` `BX-29` `BX-30` | |
 
-> 優先級：`SKIP_KEYWORDS` > `BUY_KEYWORDS`（在 SKIP 清單的商品即使符合 BUY 也不下單）
+> 優先級：`NOT_NOTIFY_KEYWORDS` > `SKIP_KEYWORDS` > `BUY_KEYWORDS`
 
 ### BUY_KEYWORDS（自動下單目標清單，funbox_monitor）
 
@@ -205,6 +210,7 @@ beyblade-funbox-monitor/
 ```
 偵測到需通知的有庫存商品（AUTO_CHECKOUT=true）
   │
+  ├─ NOT_NOTIFY_KEYWORDS 符合 → 完全靜默，不通知、不下單
   ├─ SKIP_KEYWORDS 符合 → 通知（1 小時冷卻），不下單
   ├─ BUY_KEYWORDS 不符合 → 通知（1 小時冷卻），不下單
   │
@@ -235,22 +241,22 @@ beyblade-funbox-monitor/
 #### Amazon Pay Session 設定步驟（首次或 session 過期後需要 OTP 的情況）
 
 ```bash
-# 1. 在本機執行
+# 方法 A：手動登入（首次設定，或需要簡訊 OTP 時）
 python 1999_monitor/generate_1999_session.py
 # 在開啟的瀏覽器中：登入 1999.co.jp → 加入購物車 → 點 Amazon Pay → 完成授權
-# 等待跳回 /orderamazon（不要按下單）
+# 等待跳回 /orderamazon（不要按下單），session 自動儲存並上傳至 GitHub Secret
 
-# 2. 上傳至 GitHub Secret
-base64 -i 1999_monitor/1999_storage_state.json | pbcopy
-# GitHub Repo → Settings → Secrets → AMAZON_1999_STORAGE_STATE_B64 → 貼上
+# 方法 B：自動刷新（無 OTP 時，帳密存放於 .env 即可）
+python 1999_monitor/refresh_session.py
+# 自動完成加入購物車 → Amazon Pay → 授權流程，到達 /orderamazon 後儲存 session 並上傳
 ```
 
 需設定 GitHub Secrets：`ACCOUNT_1999`（1999 email）、`PASSWORD_1999`（1999 密碼）、`AMAZON_ACCOUNT`（Amazon Japan email）、`AMAZON_PASSWORD`（Amazon Japan 密碼）。
 
 ### Email 通知格式
 
-- **廣播信**（→ 全體 GMAIL_RECIPIENTS）：商品資訊 + 結帳連結，不含下單結果
-- **個人信**（→ ACCOUNT_1999 本人）：各商品下單狀態（✅/⚠/❌）+ 後續操作說明；僅在 `AUTO_CHECKOUT=true` 且有嘗試下單時發送
+- **廣播信**（→ 全體 GMAIL_RECIPIENTS）：商品資訊（有庫存即立即發出，不含下單結果）
+- **個人信**（→ ACCOUNT_1999 本人）：各商品下單狀態（✅/⚠/❌）+ 後續操作說明；僅在 `AUTO_CHECKOUT=true` 且有嘗試下單時、於結帳完成後發送
 
 ---
 
@@ -283,9 +289,9 @@ base64 -i 1999_monitor/1999_storage_state.json | pbcopy
   │     └─ 確保商品下架後再上架，能立即重新通知並下單
   │
   ├─ 比對剩餘 seen_products
-  │     ├─ 未曾通知 → 下單 + 發通知
-  │     ├─ 上次通知超過 1 小時 → 下單 + 再次通知
-  │     └─ 1 小時內已通知 → 跳過（冷卻中）
+  │     ├─ 未曾通知 → 立即發上架通知，同時啟動下單
+  │     ├─ 上次通知超過 1 小時 → 立即發上架通知，同時啟動下單
+  │     └─ 1 小時內已通知 → 跳過通知（仍繼續嘗試下單）
   │
   └─ 更新 seen_products（台灣時間時間戳）
 ```
@@ -304,6 +310,7 @@ base64 -i 1999_monitor/1999_storage_state.json | pbcopy
   ├─ BUY_KEYWORDS 不符合 → 發通知（1 小時冷卻），跳過自動下單
   │
   └─ BUY_KEYWORDS 符合（FUNBOX_EMAIL 帳號有設定即自動下單，無獨立開關）
+        ├─ 上架通知立即寄出（不等待結帳結果）
         └─ 依 CHECKOUT_MODE 決定策略（YML 參數控制）
         │
         ├─ [sequential 模式] 帳號間平行，每帳號登入一次後逐件商品依序結帳
@@ -317,8 +324,10 @@ base64 -i 1999_monitor/1999_storage_state.json | pbcopy
               ├─ 最大並發數：PARALLEL_CHECKOUT_LIMIT（預設 6，避免記憶體或被限流）
               │
               └─ Playwright 結帳 SPA（兩個模式共用）
-                    ├─ 確認結帳頁為 /carts/{token}（session 驗證）
-                    ├─ 選擇 7-11取貨(先付款)
+                    ├─ page.goto /carts/{token}（wait_until=domcontentloaded, timeout=30s）
+                    ├─ wait_for_selector 等待 7-11 按鈕出現（最長 10s，確保 SPA 渲染）
+                    ├─ 點擊「7-11取貨(先付款)」
+                    ├─ wait_for_selector 等待「立即結帳」按鈕出現（最長 8s，確保付款表單初始化）
                     ├─ 勾選所有同意條款 checkbox
                     └─ 點擊立即結帳（精確定位 btn-lg，排除頂部 nav 隱藏連結）
 ```
@@ -375,8 +384,8 @@ base64 -i 1999_monitor/1999_storage_state.json | pbcopy
 
 ### Email 通知格式
 
-- **廣播信**（→ 全體 GMAIL_RECIPIENTS）：商品資訊 + 各帳號逐件結帳狀態（帳號 × 商品 × 結帳結果）
-- **個人信**（→ 各 Funbox 帳號）：該帳號每件商品結帳結果（✅ 成功 / ⚠ 3DS / ❌ 付款失敗 / — 略過）；有 `3ds_pending`/`payment_failed` 時附上訂單補繳連結
+- **上架通知廣播信**（→ 全體 GMAIL_RECIPIENTS）：偵測到庫存**立即**發出（不等待結帳），內含商品資訊，**不含結帳結果**
+- **個人結帳結果信**（→ 各下單帳號本人，其他收件人不收）：結帳完成後才發，含每件商品結帳結果（✅ 成功 / ⚠ 3DS / ❌ 付款失敗 / — 略過）；有 `3ds_pending`/`payment_failed` 時附上訂單補繳連結
 
 ---
 
@@ -688,7 +697,7 @@ ESLITE_EVENT_URL={設定於 GitHub Variable ESLITE_EVENT_URL}
 | 變數 | 來源 | 說明 |
 |---|---|---|
 | `SEARCH_URL` | GitHub Variable `SEARCH_URL_1999` | 監控目標（可替換為任意 1999.co.jp 搜尋 URL） |
-| `CHECK_ROUNDS` | `1`（本機預設） | 執行輪數（GitHub Actions 設為 15） |
+| `CHECK_ROUNDS` | `1`（本機預設） | 執行輪數（GitHub Actions 設為 30） |
 | `HEADLESS` | `true` | 設為 `false` 可在本機看到瀏覽器視窗 |
 
 #### Funbox
