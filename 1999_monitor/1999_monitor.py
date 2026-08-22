@@ -509,80 +509,80 @@ async def _handle_amazon_auth(page) -> str:
     return "ok"
 
 
-async def _auto_checkout_product(page, product: dict) -> str:
+async def _add_to_cart(page, product: dict) -> bool:
     """
-    單件商品完整下單流程（Amazon Pay）：
-    1. 商品頁 → 確認已登入 → 加入購物車
-    2. GET /order → 點擊 Amazon Pay 按鈕
-    3. 等待 OAuth 重導至 /orderamazon
-    4. 點擊「我同意並下單。」→ 偵測成功文字
-
-    回傳："success" | "amazon_auth_needed" | "cart_not_found" |
-           "no_amazon_pay" | "no_confirm_button" | "login_failed" | "failed"
+    商品加入購物車（不結帳）。
+    回傳 True = 成功，False = 找不到按鈕或例外。
     """
     import time as _t
     t0 = _t.perf_counter()
     title = product["title"]
 
-    try:
-        # ── Step 1：商品頁 ─────────────────────────────────────────────
-        # 封鎖 Zenlink：避免其 JS 隱藏原生「カートに入れる」按鈕
-        async def _block_zenlink(route, request):
-            await route.abort()
+    async def _block_zenlink(route, request):
+        await route.abort()
 
-        await page.route("**/*zenlink*", _block_zenlink)
-        log.info(f"[1999結帳] 開始：{title}")
-        await page.goto(product["url"], wait_until="networkidle", timeout=30_000)
+    await page.route("**/*zenlink*", _block_zenlink)
+    try:
+        # load 比 networkidle 快（不等所有 XHR 完成）
+        await page.goto(product["url"], wait_until="load", timeout=30_000)
         await _wait_cf(page)
-        await page.wait_for_timeout(_jitter(800))
+        await page.wait_for_timeout(_jitter(400))
 
         if "login" in page.url.lower():
-            log.info("[1999結帳] session 已過期，嘗試重新登入...")
+            log.info("[1999加購] session 已過期，嘗試重新登入...")
             if not await _login_1999(page):
-                return "login_failed"
-            await page.goto(product["url"], wait_until="networkidle", timeout=30_000)
+                return False
+            await page.goto(product["url"], wait_until="load", timeout=30_000)
 
-        # ── Step 2：加入購物車 ─────────────────────────────────────────
-        cart_clicked = False
         for sel in _CART_BTN_SELECTORS:
             try:
                 loc = page.locator(sel).first
                 if await loc.count() > 0 and await loc.is_visible():
                     await loc.click()
-                    cart_clicked = True
-                    log.info(f"[1999結帳] ⏱ 加入購物車（{_t.perf_counter()-t0:.2f}s）：{title}")
-                    break
+                    log.info(f"[1999加購] ✅ ({_t.perf_counter()-t0:.1f}s) {title}")
+                    await page.wait_for_timeout(_jitter(600))
+                    return True
             except Exception:
                 continue
 
+        log.warning(f"[1999加購] 找不到購物車按鈕：{title}")
+        return False
+    except Exception as e:
+        log.error(f"[1999加購] 例外：{e}")
+        return False
+    finally:
         await page.unroute("**/*zenlink*")
 
-        if not cart_clicked:
-            log.warning(f"[1999結帳] 找不到加入購物車按鈕：{title}")
-            return "cart_not_found"
 
-        await page.wait_for_timeout(_jitter(1200))
+async def _checkout_amazon_pay(page, products: list) -> str:
+    """
+    購物車已備齊後，一次 Amazon Pay 結帳所有商品。
+    回傳："success" | "no_amazon_pay" | "amazon_auth_needed" |
+           "no_confirm_button" | "login_failed" | "failed"
+    """
+    import time as _t
+    t0 = _t.perf_counter()
+    titles = "、".join(p["title"] for p in products)
 
-        # ── Step 3：前往 /order ────────────────────────────────────────
+    try:
+        # ── Step 1：/order ──────────────────────────────────────────
         await page.goto(CHECKOUT_URL, wait_until="networkidle", timeout=30_000)
         if "login" in page.url.lower():
             if not await _login_1999(page):
                 return "login_failed"
             await page.goto(CHECKOUT_URL, wait_until="networkidle", timeout=30_000)
+        log.info(f"[1999結帳] /order 載入（{_t.perf_counter()-t0:.1f}s）")
 
-        log.info(f"[1999結帳] ⏱ /order 載入（{_t.perf_counter()-t0:.2f}s）")
-
-        # ── Step 4：Amazon Pay 按鈕 ────────────────────────────────────
+        # ── Step 2：Amazon Pay ──────────────────────────────────────
         apay = page.locator(".amazonpay-button-view1, .amazonpay-button-logo").first
         if await apay.count() == 0 or not await apay.is_visible():
             log.warning("[1999結帳] 找不到 Amazon Pay 按鈕")
             return "no_amazon_pay"
 
         await apay.click()
-        log.info("[1999結帳] Amazon Pay 已點擊，等待 OAuth 重導...")
+        log.info("[1999結帳] Amazon Pay 已點擊，等待 OAuth...")
 
-        # ── Step 5：Amazon Pay 授權處理 → 等待跳回 /orderamazon ─────
-        # 先等頁面落地到 amazon.co.jp 或直接抵達 /orderamazon
+        # ── Step 3：等待落地 amazon.co.jp 或直達 /orderamazon ──────
         try:
             await page.wait_for_function(
                 f"""() => {{
@@ -593,30 +593,28 @@ async def _auto_checkout_product(page, product: dict) -> str:
                 timeout=20_000,
             )
         except PlaywrightTimeoutError:
-            log.warning(f"[1999結帳] Amazon Pay 點擊後無跳轉，停在：{page.url}")
+            log.warning(f"[1999結帳] Amazon Pay 無跳轉，停在：{page.url}")
             return "failed"
 
-        # 若落在 Amazon 域 → 處理「続行」或帳密登入
         if "amazon.co.jp" in page.url and "/orderamazon" not in page.url:
             auth_result = await _handle_amazon_auth(page)
             if auth_result != "ok":
                 return auth_result
 
-        # 等待最終跳回 /orderamazon（授權後可能還有 payments.amazon 中繼）
         try:
             await page.wait_for_url(f"{BASE_URL}/orderamazon*", timeout=45_000)
         except PlaywrightTimeoutError:
             cur = page.url
             if any(k in cur for k in ("amazon.co.jp", "payments.amazon")):
-                log.warning(f"[1999結帳] 授權後仍未跳回 /orderamazon，停在：{cur}")
+                log.warning(f"[1999結帳] 授權後未跳回 /orderamazon，停在：{cur}")
                 return "amazon_auth_needed"
-            log.warning(f"[1999結帳] 等待 /orderamazon 超時（{_t.perf_counter()-t0:.2f}s），停在：{cur}")
+            log.warning(f"[1999結帳] /orderamazon 超時，停在：{cur}")
             return "failed"
 
         await page.wait_for_load_state("networkidle")
-        log.info(f"[1999結帳] ⏱ /orderamazon 載入（{_t.perf_counter()-t0:.2f}s）")
+        log.info(f"[1999結帳] /orderamazon 載入（{_t.perf_counter()-t0:.1f}s）")
 
-        # ── Step 6：確認下單 ───────────────────────────────────────────
+        # ── Step 4：確認下單 ────────────────────────────────────────
         confirm = page.locator("#btnSendRight, input[name*='btnSendRight']").first
         if await confirm.count() == 0 or not await confirm.is_visible():
             log.warning("[1999結帳] 找不到確認下單按鈕")
@@ -625,15 +623,15 @@ async def _auto_checkout_product(page, product: dict) -> str:
         await confirm.click()
         await page.wait_for_timeout(3000)
 
-        # ── Step 7：成功偵測 ───────────────────────────────────────────
+        # ── Step 5：成功偵測 ────────────────────────────────────────
         body = ""
         try:
             body = await page.locator("body").inner_text(timeout=5000)
         except Exception:
             pass
 
-        if "採購訂單（已完成）" in body or "ご注文ありがとう" in body:
-            log.info(f"[1999結帳] ✅ 下單成功（{_t.perf_counter()-t0:.2f}s）：{title}")
+        if "採購訂単（已完成）" in body or "ご注文ありがとう" in body:
+            log.info(f"[1999結帳] ✅ 下單成功（{_t.perf_counter()-t0:.1f}s）：{titles}")
             return "success"
 
         log.warning(f"[1999結帳] 結果不明：{page.url} | body[:80]={body[:80]}")
@@ -696,20 +694,32 @@ async def check_once(page, context=None) -> bool:
                 if not to_checkout:
                     log.info("所有可通知商品均已下單過，跳過下單")
                 else:
-                    log.info(f"自動下單：{len(to_checkout)} 件商品")
+                    log.info(f"批次加入購物車：{len(to_checkout)} 件")
+                    # ① 一次把所有商品加入購物車
+                    cart_added = []
                     for p in to_checkout:
-                        status = await _auto_checkout_product(page, p)
-                        checkout_results[p["href"]] = status
+                        if await _add_to_cart(page, p):
+                            cart_added.append(p)
+                        else:
+                            checkout_results[p["href"]] = "cart_not_found"
+
+                    # ② 再一次 Amazon Pay 結帳所有已加入的商品
+                    if cart_added:
+                        log.info(f"一次結帳：{len(cart_added)} 件")
+                        status = await _checkout_amazon_pay(page, cart_added)
+                        for p in cart_added:
+                            checkout_results[p["href"]] = status
                         if status == "success":
-                            purchased[p["href"]] = now.isoformat()
-                    save_order_state(purchased)
-                    # 更新 Amazon session（讓 cookie 保持新鮮）
-                    if context:
-                        try:
-                            await context.storage_state(path=str(STORAGE_STATE_FILE))
-                            log.info(f"Amazon session 已更新：{STORAGE_STATE_FILE}")
-                        except Exception as e:
-                            log.warning(f"儲存 session 失敗：{e}")
+                            for p in cart_added:
+                                purchased[p["href"]] = now.isoformat()
+                        save_order_state(purchased)
+                        # 更新 Amazon session（讓 cookie 保持新鮮）
+                        if context:
+                            try:
+                                await context.storage_state(path=str(STORAGE_STATE_FILE))
+                                log.info(f"Amazon session 已更新：{STORAGE_STATE_FILE}")
+                            except Exception as e:
+                                log.warning(f"儲存 session 失敗：{e}")
 
             log.info(
                 f"發送通知：{len(to_notify)} 件"

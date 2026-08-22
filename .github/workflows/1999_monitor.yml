@@ -92,7 +92,7 @@ jobs:
           GMAIL_PASSWORD:    ${{ secrets.GMAIL_PASSWORD }}
           GMAIL_RECIPIENTS:  ${{ secrets.GMAIL_RECIPIENTS }}
           SEARCH_URL:        ${{ vars.SEARCH_URL_1999 }}
-          CHECK_ROUNDS:      ${{ inputs.check_rounds || '15' }}
+          CHECK_ROUNDS:      ${{ inputs.check_rounds || '30' }}
           STATE_FILE:        'seen_products.json'
           AUTO_CHECKOUT:     ${{ inputs.auto_checkout || 'false' }}
           ACCOUNT_1999:      ${{ secrets.ACCOUNT_1999 }}

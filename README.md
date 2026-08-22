@@ -22,7 +22,7 @@ flowchart TD
     CRON -->|workflow_dispatch| GA3["GitHub Actions\neslite_monitor\nubuntu VM"]
     CRON -->|workflow_dispatch| GA4["GitHub Actions\neslite_product_monitor\nubuntu VM"]
 
-    GA1 --> PW1["Playwright async\n15 輪 / 次（約 2 分鐘）\n隨機 UA + viewport"]
+    GA1 --> PW1["Playwright async\n30 輪 / 次（約 5 分鐘）\n隨機 UA + viewport"]
     GA2 --> REQ["requests.Session 登入/加購\n+ Playwright 結帳\n50 輪 / 次（約 4 分鐘）\n連續 3 輪失敗 → 提早結束"]
     GA3 --> PW3["CombinedMonitor（預設）\nPlaywright sync + ThreadPoolExecutor\n50 輪 / 次（約 5 分鐘）\n監控 context 匿名"]
     GA4 --> PW4["ProductMonitor\nPlaywright sync\n35 輪 / 次（約 3.5 分鐘）\n監控 context 匿名"]
@@ -89,8 +89,8 @@ beyblade-funbox-monitor/
 | 偵測商品 | Beyblade X 系列 | 戰鬥陀螺集合頁 | Beyblade X 書展 API | `ESLITE_EXTRA_PRODUCTS` GUID 清單 |
 | 反爬蟲機制 | Cloudflare（隨機 UA/viewport/locale） | Cyberbiz `/products.json`（無反爬） | Cloudflare（Playwright 繞過） | Cloudflare（Playwright 繞過） |
 | 技術架構 | Playwright async | requests 登入/加購 + Playwright 結帳 | `CombinedMonitor`（OOP，Playwright sync + ThreadPoolExecutor 平行抓取，預設） | `ProductMonitor`（OOP，Playwright sync） |
-| 每次執行輪數 | **15 輪**（間隔 5~8 秒） | **60 輪**（間隔 3~5 秒） | **50 輪**（間隔 3~5 秒） | **35 輪**（間隔 3~5 秒） |
-| 執行時長 / timeout | ~2 分鐘 / 25 min | ~5 分鐘 / 25 min | ~5 分鐘 / 25 min | ~3.5 分鐘 / 25 min |
+| 每次執行輪數 | **30 輪**（間隔 5~8 秒） | **60 輪**（間隔 3~5 秒） | **50 輪**（間隔 3~5 秒） | **35 輪**（間隔 3~5 秒） |
+| 執行時長 / timeout | ~5 分鐘 / 25 min | ~5 分鐘 / 25 min | ~5 分鐘 / 25 min | ~3.5 分鐘 / 25 min |
 | 通知冷卻 | 1 小時冷卻 | 1 小時冷卻 | **無冷卻（每輪有庫存即通知）** | **無冷卻（每輪有庫存即通知）** |
 | 自動下單 | **有**（Amazon Pay，需預存 session） | **有**（3 帳號平行，7-11取貨先付款） | **有**（加入購物車 + 自動結帳） | **有**（加入購物車 + 自動結帳） |
 | 觸發頻率 | **每 5 分鐘一次** | **每 5 分鐘一次** | **每 5 分鐘一次** | **每 5 分鐘一次**（獨立 cron-job） |
@@ -151,20 +151,24 @@ beyblade-funbox-monitor/
 偵測到需通知的有庫存商品（AUTO_CHECKOUT=true）
   │
   └─ Playwright（含預存 Amazon session）
-        ├─ 商品頁 → 點擊「カートに入れる」（多 selector 備援）
-        ├─ GET /order → 點擊 Amazon Pay 按鈕
-        ├─ 等待跳轉至 amazon.co.jp
-        │     ├─ 已登入 → 偵測「続行」按鈕並點擊
-        │     └─ 未登入 → 填入 AMAZON_ACCOUNT / AMAZON_PASSWORD 完成登入
-        ├─ 302 跳回 /orderamazon?amazonCheckoutSessionId=...
-        ├─ 點擊「我同意並下單。」（#btnSendRight）
-        └─ 偵測「採購訂單（已完成）」→ success
+        │
+        ├─ ① 批次加入購物車（wait_until=load，速度最佳化）
+        │     對每件商品：商品頁 → 封鎖 Zenlink → 點擊「カートに入れる」
+        │
+        └─ ② 一次 Amazon Pay 結帳（所有商品合併在同一張訂單）
+              ├─ GET /order → 點擊 Amazon Pay 按鈕
+              ├─ 等待跳轉至 amazon.co.jp
+              │     ├─ 有 session → 偵測「続行」按鈕（div[role=button]）並點擊
+              │     └─ 無 session → 填入 AMAZON_ACCOUNT / AMAZON_PASSWORD 登入後點擊
+              ├─ 302 跳回 /orderamazon?amazonCheckoutSessionId=...
+              ├─ 點擊「我同意並下單。」（#btnSendRight）
+              └─ 偵測「採購訂單（已完成）」→ success
 ```
 
 | 結帳狀態 | 說明 |
 |---|---|
 | `success` | ✅ 已自動下單完成 |
-| `amazon_auth_needed` | ⚠ Amazon Pay 授權失敗（OTP 驗證、帳密錯誤，或需重新執行 `generate_1999_session.py`） |
+| `amazon_auth_needed` | ⚠ Amazon Pay 授權失敗（帳密錯誤，或需重新執行 `refresh_session.py` 更新 session） |
 | `cart_not_found` | ❌ 找不到加入購物車按鈕（可能已售完） |
 | `no_amazon_pay` | ❌ 找不到 Amazon Pay 按鈕 |
 | `login_failed` | ❌ 1999 帳號登入失敗 |
