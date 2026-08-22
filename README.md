@@ -170,6 +170,36 @@ beyblade-funbox-monitor/
 
 > 優先級：`SKIP_KEYWORDS` > `BUY_KEYWORDS`（在 SKIP 清單的商品即使符合 BUY 也不下單）
 
+### BUY_KEYWORDS（自動下單目標清單，funbox_monitor）
+
+依志願優先順序排列，僅符合以下關鍵字的商品才自動下單：
+
+| 順序 | 關鍵字 |
+|---|---|
+| 1 | `BX-09` |
+| 2–5 | `UX-17` `UX-21` `UX-15` `UX-04` |
+| 6 | `BX-46` |
+| 7–8 | `CX-16` `CX-04` |
+| 9–10 | `UX-03` `UX-16` |
+| 11 | `CX-11` |
+| 12–14 | `UX-11` `UX-20` `UX-10` |
+| 15 | `CX-07` |
+| 16 | `UX-01` |
+| 17–19 | `BX-35` `BX-48` `BX-49` |
+| 20 | `CX-19` |
+| 21–22 | `BX-50` `BX-34` |
+| 23–26 | `CX-13` `CX-08` `CX-17` `CX-05` |
+| 27–29 | `BX-42` `BX-29` `BX-30` |
+| 30–31 | `BXG-22` `BXG-11` |
+
+### SKIP_BUY_KEYWORDS（通知但不下單，funbox_monitor）
+
+| 關鍵字 | 備註 |
+|---|---|
+| `BXG-04` `BXG-20` `BXG-29` `BXG-33` | BXG 系列 |
+| `BX-26` `BX-33` | BX 系列 |
+| `銀牙烈虎` `蜘蛛人` `暴風天馬` `烈焰飛鳳` | 其他 |
+
 ### 自動下單流程（Amazon Pay）
 
 ```
@@ -269,10 +299,11 @@ base64 -i 1999_monitor/1999_storage_state.json | pbcopy
   │
   ├─ SKIP_KEYWORDS 商品（標題含 BX-43/BX-25/BX-11/Marvel 聯名/Star Wars 聯名 等）
   │     → 發通知（1 小時冷卻），跳過自動下單；funbox 與 1999 共用同一份清單
-  ├─ SKIP_BUY_KEYWORDS 商品（標題含 BX-33/BX-26/BXG-33/BXG-29/蜘蛛人/暴風天馬/銀牙烈虎/烈焰飛鳳）
+  ├─ SKIP_BUY_KEYWORDS 商品（BXG-04/銀牙烈虎/BX-33/BX-26/BXG-33/BXG-29/BXG-20/蜘蛛人/暴風天馬/烈焰飛鳳）
   │     → 發通知，跳過自動下單
+  ├─ BUY_KEYWORDS 不符合 → 發通知，跳過自動下單
   │
-  └─ 一般商品 → 依 CHECKOUT_MODE 決定策略（YML 參數控制）
+  └─ BUY_KEYWORDS 符合 → 依 CHECKOUT_MODE 決定策略（YML 參數控制）
         │
         ├─ [sequential 模式] 帳號間平行，每帳號登入一次後逐件商品依序執行：
         │     ├─ 商品排序：PRIORITY_KEYWORDS 最優先 → 購買次數少的優先（自然輪替）

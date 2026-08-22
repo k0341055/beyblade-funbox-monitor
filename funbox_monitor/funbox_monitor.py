@@ -97,14 +97,36 @@ SKIP_KEYWORDS: list[str] = [
 
 # ── 通知但不自動購買的商品關鍵字 ──────────────────────
 SKIP_BUY_KEYWORDS: list[str] = [
+    "BXG-04",
+    "銀牙烈虎",
     "BX-33",
     "BX-26",
     "BXG-33",
     "BXG-29",
+    "BXG-20",
     "蜘蛛人",
     "暴風天馬",
-    "銀牙烈虎",
     "烈焰飛鳳",
+]
+
+# ── 自動下單目標商品關鍵字（白名單，依志願順序）────────
+# 商品名稱含以下任一關鍵字 → 才執行自動下單
+BUY_KEYWORDS: list[str] = [
+    "BX-09",
+    "UX-17", "UX-21", "UX-15", "UX-04",
+    "BX-46",
+    "CX-16", "CX-04",
+    "UX-03", "UX-16",
+    "CX-11",
+    "UX-11", "UX-20", "UX-10",
+    "CX-07",
+    "UX-01",
+    "BX-35", "BX-48", "BX-49",
+    "CX-19",
+    "BX-50", "BX-34",
+    "CX-13", "CX-08", "CX-17", "CX-05",
+    "BX-42", "BX-29", "BX-30",
+    "BXG-22", "BXG-11",
 ]
 
 # ── 優先購買的商品關鍵字（無視購買次數，永遠排在最前面）──
@@ -699,9 +721,10 @@ def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
         p for p in products
         if "APP" not in p["title"].upper()
         and not any(kw.upper() in p["title"].upper() for kw in SKIP_BUY_KEYWORDS)
+        and any(kw.upper() in p["title"].upper() for kw in BUY_KEYWORDS)
     ]
     if not non_app:
-        log.info("所有商品均為 APP 限定或在 SKIP_BUY_KEYWORDS 中，略過自動購買")
+        log.info("所有商品均為 APP 限定、在 SKIP_BUY_KEYWORDS 中或不在 BUY_KEYWORDS 白名單，略過自動購買")
         return {}
 
     if MAX_BUY_PRODUCTS > 0 and len(non_app) > MAX_BUY_PRODUCTS:
