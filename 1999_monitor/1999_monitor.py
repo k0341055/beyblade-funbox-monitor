@@ -78,7 +78,7 @@ SKIP_KEYWORDS: list[str] = [
 # 不在此清單且不在 SKIP_KEYWORDS → 僅發通知，不下單
 BUY_KEYWORDS: list[str] = [
     "BX-09",
-    "UX-15", "UX-21", "UX-17", "UX-03", "UX-11", "UX-01",
+    "UX-15", "UX-21", "UX-17", "UX-03", "UX-11", "UX-16", "UX-01",
     "BX-35", "BX-48", "BX-23",
     "UX-20",
     "CX-19", "CX-08", "CX-18",
