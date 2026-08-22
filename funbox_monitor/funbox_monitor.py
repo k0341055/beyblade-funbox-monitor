@@ -488,16 +488,23 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
             page = ctx.new_page()
 
             t1 = _time.perf_counter()
-            page.goto(cart_url, wait_until="networkidle", timeout=15000)
-            page.wait_for_timeout(1500)
+            page.goto(cart_url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(2000)
             log.info(f"[{email}] ⏱ 結帳頁載入（{_time.perf_counter()-t1:.2f}s）：{page.url}")
             if "/carts/" not in page.url:
                 log.error(f"[{email}] 結帳頁面異常（{page.url}），中止結帳")
                 br.close()
                 return "cart"
 
-            # 選擇 7-11 取貨（貨到付款或先付款均可）
+            # 選擇 7-11 取貨（等待 SPA 渲染後再點擊）
             t2 = _time.perf_counter()
+            try:
+                page.wait_for_selector(
+                    "button[id^='cvs-shipping-button'], button:has-text('7-11')",
+                    timeout=10000,
+                )
+            except Exception:
+                pass
             clicked_711 = False
             for sel in [
                 "button[id^='cvs-shipping-button']",
@@ -510,7 +517,14 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
                     btn = page.locator(sel).first
                     if btn.count() > 0 and btn.is_visible():
                         btn.click()
-                        page.wait_for_timeout(1000)
+                        # 等待付款表單/結帳按鈕由 SPA 渲染完成
+                        try:
+                            page.wait_for_selector(
+                                "a.btn-lg:has-text('立即結帳'), button.btn-lg:has-text('立即結帳')",
+                                timeout=8000,
+                            )
+                        except Exception:
+                            page.wait_for_timeout(2000)
                         log.info(f"[{email}] ⏱ 7-11 按鈕點擊（{_time.perf_counter()-t2:.2f}s）：{btn.inner_text()[:30].strip()}")
                         clicked_711 = True
                         break
@@ -929,40 +943,47 @@ def check_once() -> bool:
             or _parse_ts(notified[p["href"]]) < cutoff
         ]
 
-    
-        account_results = auto_buy_all(products, purchased, attempts)
-        
-        if to_notify or account_results:
-            for acct_email, result in account_results.items():
-                checkout = result.get("checkout", {})
-                for href, status in checkout.items():
-                    if status == "success":
-                        purchased.setdefault(href, {})
-                        old_count = purchased[href].get(acct_email, 0)
-                        purchased[href][acct_email] = old_count + 1
-                        p_obj = next((x for x in to_notify if x["href"] == href), None)
-                        log.info(
-                            f"已記錄購買成功（第{old_count + 1}次）：{acct_email} → "
-                            f"{p_obj['title'] if p_obj else href}"
-                        )
-                        # 成功後重置連續失敗計數器，避免歷史失敗次數跨輪累積封鎖帳號
-                        if acct_email in attempts.get(href, {}):
-                            attempts[href][acct_email] = 0
-                            log.info(f"[{acct_email}] 購買成功，重置連續失敗計數器：{href}")
-                    else:
-                        attempts.setdefault(href, {})
-                        attempts[href][acct_email] = attempts[href].get(acct_email, 0) + 1
-                        log.info(f"[{acct_email}] 記錄失敗嘗試 #{attempts[href][acct_email]}：{href}")
+        # ── 自動下單（背景 thread）同步啟動，不阻塞通知 ──
+        with ThreadPoolExecutor(max_workers=1) as _buy_ex:
+            _buy_future = _buy_ex.submit(auto_buy_all, products, purchased, attempts)
 
-            log.info(
-                f"發送通知：{len(to_notify)} 件"
-                f"（共 {len(products)} 件，跳過 {len(products) - len(to_notify)} 件冷卻中）"
-            )
-            notify_products(to_notify, account_results)
-            for p in to_notify:
-                notified[p["href"]] = now.isoformat()
-        else:
-            log.info(f"所有 {len(products)} 件商品均在 1 小時冷卻期內")
+            # ── 立即發送庫存上架通知（不含結帳結果）──
+            if to_notify:
+                log.info(
+                    f"發送庫存通知：{len(to_notify)} 件"
+                    f"（共 {len(products)} 件，跳過 {len(products) - len(to_notify)} 件冷卻中）"
+                )
+                _broadcast_email(to_notify, None)
+                for p in to_notify:
+                    notified[p["href"]] = now.isoformat()
+            else:
+                log.info(f"所有 {len(products)} 件商品均在 1 小時冷卻期內")
+
+            account_results = _buy_future.result()
+
+        # ── 更新購買狀態 + 個別發送結帳結果（只寄給該下單帳號）──
+        for acct_email, result in account_results.items():
+            checkout = result.get("checkout", {})
+            for href, status in checkout.items():
+                if status == "success":
+                    purchased.setdefault(href, {})
+                    old_count = purchased[href].get(acct_email, 0)
+                    purchased[href][acct_email] = old_count + 1
+                    p_obj = next((x for x in products if x["href"] == href), None)
+                    log.info(
+                        f"已記錄購買成功（第{old_count + 1}次）：{acct_email} → "
+                        f"{p_obj['title'] if p_obj else href}"
+                    )
+                    if acct_email in attempts.get(href, {}):
+                        attempts[href][acct_email] = 0
+                        log.info(f"[{acct_email}] 購買成功，重置連續失敗計數器：{href}")
+                else:
+                    attempts.setdefault(href, {})
+                    attempts[href][acct_email] = attempts[href].get(acct_email, 0) + 1
+                    log.info(f"[{acct_email}] 記錄失敗嘗試 #{attempts[href][acct_email]}：{href}")
+
+            if acct_email in GMAIL_RECIPIENTS:
+                _personal_checkout_email(acct_email, result, products)
 
         save_state(notified, purchased, attempts)
         return True
