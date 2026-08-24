@@ -680,7 +680,7 @@ class EsliteMonitorBase(ABC):
                 # SKIP_KEYWORDS 商品：通知但不自動下單
                 checkout_products = [
                     p for p in products
-                    if not any(kw.upper() in p["title"].upper() for kw in SKIP_KEYWORDS)
+                    if not any(kw.upper() in p["name"].upper() for kw in SKIP_KEYWORDS)
                 ]
                 skipped = len(products) - len(checkout_products)
                 if skipped:
