@@ -78,6 +78,7 @@ SKIP_KEYWORDS: list[str] = [
     "BX-25",
     "BX-33",
     "BX-26",
+    "CX-10",
 
     # BXG 系列
     "BXG-29",
