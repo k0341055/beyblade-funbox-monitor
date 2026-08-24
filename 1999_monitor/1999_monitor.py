@@ -72,33 +72,33 @@ NOT_NOTIFY_KEYWORDS: list[str] = [
 # 只通知、不自動下單
 # ─────────────────────────────────────────────
 
-SKIP_KEYWORDS: list[str] = [
-    # BX 系列
-    "BX-11",
-    "BX-25",
-    "BX-33",
-    "BX-26",
-    "CX-10",
+# SKIP_KEYWORDS: list[str] = [
+#     # BX 系列
+#     "BX-11",
+#     "BX-25",
+#     "BX-33",
+#     "BX-26",
+#     "CX-10",
 
-    # BXG 系列
-    "BXG-29",
-    "BXG-33",
+#     # BXG 系列
+#     "BXG-29",
+#     "BXG-33",
 
-    # Marvel 聯名
-    "蜘蛛人",
-    "鋼鐵人",
-    "薩諾斯",
-    "綠惡魔",
+#     # Marvel 聯名
+#     "蜘蛛人",
+#     "鋼鐵人",
+#     "薩諾斯",
+#     "綠惡魔",
 
-    # Star Wars 聯名
-    "路克天行者",
-    "達斯維達",
+#     # Star Wars 聯名
+#     "路克天行者",
+#     "達斯維達",
 
-    # 其他
-    "暴風天馬",
-    "銀牙烈虎",
-    "烈焰飛鳳",
-]
+#     # 其他
+#     "暴風天馬",
+#     "銀牙烈虎",
+#     "烈焰飛鳳",
+# ]
 
 
 # ─────────────────────────────────────────────
@@ -1452,25 +1452,25 @@ async def check_once(
         # 只通知、不下單
         # ─────────────────────────────
 
-        skip_hrefs: set = set()
+        # skip_hrefs: set = set()
 
-        if SKIP_KEYWORDS:
-            for p in products:
-                if any(
-                    kw.upper()
-                    in p["title"].upper()
-                    for kw in SKIP_KEYWORDS
-                ):
-                    skip_hrefs.add(
-                        p["href"]
-                    )
+        # if SKIP_KEYWORDS:
+        #     for p in products:
+        #         if any(
+        #             kw.upper()
+        #             in p["title"].upper()
+        #             for kw in SKIP_KEYWORDS
+        #         ):
+        #             skip_hrefs.add(
+        #                 p["href"]
+        #             )
 
-            if skip_hrefs:
-                log.info(
-                    "SKIP_KEYWORDS "
-                    "商品（僅通知，不下單）："
-                    f"{len(skip_hrefs)} 件"
-                )
+        #     if skip_hrefs:
+        #         log.info(
+        #             "SKIP_KEYWORDS "
+        #             "商品（僅通知，不下單）："
+        #             f"{len(skip_hrefs)} 件"
+        #         )
 
         now = datetime.now(
             TW_TZ
@@ -1523,8 +1523,8 @@ async def check_once(
                     if (
                         p["href"] not in purchased
                         and
-                        p["href"] not in skip_hrefs
-                        and
+                        # p["href"] not in skip_hrefs
+                        # and
                         any(
                             kw.upper()
                             in p["title"].upper()
