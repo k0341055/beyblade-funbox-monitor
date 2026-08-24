@@ -450,7 +450,7 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
 
         # ── Playwright 結帳 ──
         t4 = _time.perf_counter()
-        status = _playwright_checkout(email, cart_url, cookies_list)
+        status = _playwright_checkout(email, cart_url, cookies_list, p["href"])
         checkout_statuses[p["href"]] = status
         log.info(
             f"[{email}] ⏱ 結帳完成：{p['title']} → {status}"
@@ -461,14 +461,23 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
 
 
 # ─────────────────────────────────────────────
-# Playwright 結帳（7-11 貨到付款）
+# Playwright 結帳（7-11 配送）
 # ─────────────────────────────────────────────
 
 
-def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
+def _playwright_checkout(
+    email: str,
+    cart_url: str,
+    cookies_list: list,
+    product_href: str = "",
+) -> str:
     """
-    用 Playwright 完成結帳，選 7-11 貨到付款。
-    回傳："success" | "cart" | "3ds_pending" | "failed"
+    Playwright 結帳流程：
+      購物車 → 點「立即結帳」連結 → 取消紅利折抵 →
+      選 7-11 配送（貨到付款優先，次選取貨先付款）→
+      點「立即結帳」按鈕 → 前往會員中心確認訂單。
+    回傳："success" | "cart" | "3ds_pending" | "payment_failed" |
+          "checkout_limited" | "stock_out" | "failed"
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -477,7 +486,7 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
         return "cart"
 
     import time as _time
-    t_pw_start = _time.perf_counter()
+    t0 = _time.perf_counter()
 
     try:
         with sync_playwright() as pw:
@@ -486,119 +495,151 @@ def _playwright_checkout(email: str, cart_url: str, cookies_list: list) -> str:
             ctx.add_cookies(cookies_list)
             page = ctx.new_page()
 
+            # ── 1. 進入購物車頁 ──────────────────────────────────────────
             t1 = _time.perf_counter()
             page.goto(cart_url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2000)
-            log.info(f"[{email}] ⏱ 結帳頁載入（{_time.perf_counter()-t1:.2f}s）：{page.url}")
+            log.info(f"[{email}] ⏱ 購物車頁載入（{_time.perf_counter()-t1:.2f}s）：{page.url}")
             if "/carts/" not in page.url:
-                log.error(f"[{email}] 結帳頁面異常（{page.url}），中止結帳")
+                log.error(f"[{email}] 購物車頁面異常（{page.url}），中止結帳")
                 br.close()
                 return "cart"
 
-            # 選擇 7-11 取貨（等待 SPA 渲染後再點擊）
+            # ── 2. 點「立即結帳」連結，進入結帳頁 ───────────────────────
             t2 = _time.perf_counter()
             try:
-                page.wait_for_selector(
-                    "button[id^='cvs-shipping-button'], button:has-text('7-11')",
-                    timeout=10000,
-                )
-            except Exception:
-                pass
-            clicked_711 = False
-            for sel in [
-                "button[id^='cvs-shipping-button']",
-                "button:has-text('7-11 貨到付款')",
-                "button:has-text('7-11取貨')",
-                "button:has-text('7-11')",
-                "[data-translate-keys='cod_names.seven']",
-            ]:
-                try:
-                    btn = page.locator(sel).first
-                    if btn.count() > 0 and btn.is_visible():
-                        btn.click()
-                        # 等待付款表單/結帳按鈕由 SPA 渲染完成
-                        try:
-                            page.wait_for_selector(
-                                "a.btn-lg:has-text('立即結帳'), button.btn-lg:has-text('立即結帳')",
-                                timeout=8000,
-                            )
-                        except Exception:
-                            page.wait_for_timeout(2000)
-                        log.info(f"[{email}] ⏱ 7-11 按鈕點擊（{_time.perf_counter()-t2:.2f}s）：{btn.inner_text()[:30].strip()}")
-                        clicked_711 = True
-                        break
-                except Exception:
-                    continue
-            if not clicked_711:
-                log.warning(f"[{email}] ⏱ 找不到 7-11 按鈕（{_time.perf_counter()-t2:.2f}s），繼續嘗試結帳")
-
-            # 勾選所有同意條款 checkbox
-            for cb in page.locator("input[type='checkbox']").all():
-                try:
-                    if cb.is_visible() and not cb.is_checked():
-                        cb.check()
-                        page.wait_for_timeout(200)
-                except Exception:
-                    pass
-
-            # 點擊立即結帳
-            t3 = _time.perf_counter()
-            clicked_checkout = False
-            for sel in [
-                "a.btn-lg:has-text('立即結帳')",
-                "button.btn-lg:has-text('立即結帳')",
-                "a.btn-default:has-text('立即結帳')",
-                "button.btn-default:has-text('立即結帳')",
-                ".btn-bloc:has-text('立即結帳')",
-            ]:
-                try:
-                    loc = page.locator(sel).first
-                    if loc.count() > 0 and loc.is_visible():
-                        loc.scroll_into_view_if_needed()
-                        loc.click()
-                        log.info(f"[{email}] ⏱ 立即結帳點擊（{_time.perf_counter()-t3:.2f}s），等待跳轉...")
-                        clicked_checkout = True
-                        break
-                except Exception:
-                    continue
-            if not clicked_checkout:
-                log.error(f"[{email}] 找不到結帳按鈕，中止")
+                page.get_by_role("link", name="立即結帳").click()
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+                page.wait_for_timeout(1500)
+                log.info(f"[{email}] ⏱ 進入結帳頁（{_time.perf_counter()-t2:.2f}s）：{page.url}")
+            except Exception as e:
+                log.error(f"[{email}] 找不到「立即結帳」連結：{e}")
                 br.close()
                 return "cart"
 
-            # 輪詢結果
-            t4 = _time.perf_counter()
-            for poll in range(1, 21):
-                page.wait_for_timeout(1500)
-                url = page.url
-                if any(k in url for k in ("order", "thank", "complete", "success")):
-                    if "show_failed" in url:
-                        log.warning(f"[{email}] ⏱ 付款失敗 show_failed（輪詢第{poll}次，{_time.perf_counter()-t4:.2f}s）：{url}")
-                        br.close()
-                        return "payment_failed"
-                    log.info(f"[{email}] ⏱ 結帳確認頁（輪詢第{poll}次，{_time.perf_counter()-t4:.2f}s）：{url}")
-                    br.close()
-                    return "success"
-                if any(k in url for k in ("acs.", "challenge", "3ds", "sinopac", "esunbank", "authentication")):
-                    log.warning(f"[{email}] ⏱ 3DS 觸發（輪詢第{poll}次，{_time.perf_counter()-t4:.2f}s）：{url}")
-                    br.close()
-                    return "3ds_pending"
-                try:
-                    body_text = page.locator("body").inner_text(timeout=500)
-                    if any(kw in body_text for kw in _CHECKOUT_LIMIT_TEXTS):
-                        log.warning(f"[{email}] ⏱ 限購攔截（輪詢第{poll}次，{_time.perf_counter()-t4:.2f}s）：{body_text[:200]}")
-                        br.close()
-                        return "checkout_limited"
-                    if any(kw in body_text for kw in _CHECKOUT_STOCK_OUT_TEXTS):
-                        log.warning(f"[{email}] ⏱ 商品售完（輪詢第{poll}次，{_time.perf_counter()-t4:.2f}s）：{body_text[:200]}")
-                        br.close()
-                        return "stock_out"
-                except Exception:
-                    pass
+            # ── 3. 取消紅利點數折抵（有點數才顯示，無則跳過）────────────
+            try:
+                page.get_by_role(
+                    "spinbutton",
+                    name=re.compile(r"請輸入會員紅利折抵點數"),
+                ).first.fill("0")
+                page.get_by_role("button", name="確認").first.click()
+                page.wait_for_timeout(1000)
+                log.info(f"[{email}] 紅利點數已設為 0")
+            except Exception:
+                pass
 
-            log.warning(f"[{email}] ⏱ 輪詢逾時（{_time.perf_counter()-t4:.2f}s），停在：{page.url}")
+            # ── 4. 選擇配送：7-11 貨到付款 → 7-11 取貨(先付款) ─────────
+            t3 = _time.perf_counter()
+            clicked_shipping = False
+            for name_re, label in [
+                (re.compile(r"7-11 貨到付款"), "7-11 貨到付款"),
+                (re.compile(r"7-11 取貨"), "7-11 取貨(先付款)"),
+            ]:
+                if clicked_shipping:
+                    break
+                try:
+                    page.get_by_role("button", name=name_re).first.click()
+                    page.wait_for_timeout(1000)
+                    clicked_shipping = True
+                    log.info(
+                        f"[{email}] ⏱ 選擇配送：{label}"
+                        f"（{_time.perf_counter()-t3:.2f}s）"
+                    )
+                except Exception:
+                    continue
+            if not clicked_shipping:
+                log.warning(f"[{email}] 找不到 7-11 配送按鈕，繼續結帳")
+
+            # ── 5. 點「立即結帳」按鈕，送出訂單 ─────────────────────────
+            t4 = _time.perf_counter()
+            try:
+                page.get_by_role("button", name="立即結帳").click()
+                log.info(f"[{email}] ⏱ 送出訂單（{_time.perf_counter()-t4:.2f}s）")
+            except Exception as e:
+                log.error(f"[{email}] 找不到「立即結帳」按鈕：{e}")
+                br.close()
+                return "cart"
+
+            # ── 6. 等待跳轉，快速判斷 3DS / 付款失敗 / 直接成功 ─────────
+            page.wait_for_timeout(3000)
+            url = page.url
+            if "show_failed" in url:
+                log.warning(f"[{email}] 付款失敗（show_failed）：{url}")
+                br.close()
+                return "payment_failed"
+            if any(k in url for k in ("acs.", "challenge", "3ds", "sinopac", "esunbank", "authentication")):
+                log.warning(f"[{email}] 3DS 驗證觸發：{url}")
+                br.close()
+                return "3ds_pending"
+            if any(k in url for k in ("order", "thank", "complete", "success")):
+                log.info(
+                    f"[{email}] ✅ 結帳成功（URL）"
+                    f"（{_time.perf_counter()-t0:.1f}s）：{url}"
+                )
+                br.close()
+                return "success"
+
+            # 限購 / 售完文字偵測
+            try:
+                body_text = page.locator("body").inner_text(timeout=2000)
+                if any(kw in body_text for kw in _CHECKOUT_LIMIT_TEXTS):
+                    log.warning(f"[{email}] 限購攔截：{body_text[:200]}")
+                    br.close()
+                    return "checkout_limited"
+                if any(kw in body_text for kw in _CHECKOUT_STOCK_OUT_TEXTS):
+                    log.warning(f"[{email}] 商品售完：{body_text[:200]}")
+                    br.close()
+                    return "stock_out"
+            except Exception:
+                pass
+
+            # ── 7. 前往會員中心確認最新訂單 ─────────────────────────────
+            t5 = _time.perf_counter()
+            try:
+                page.locator(".dropdown.static > a").first.click()
+                page.get_by_role("link", name="會員中心").click()
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+                page.wait_for_timeout(1000)
+                log.info(
+                    f"[{email}] ⏱ 前往會員中心"
+                    f"（{_time.perf_counter()-t5:.2f}s）：{page.url}"
+                )
+
+                if product_href:
+                    # 比對最新訂單是否含有目標商品連結
+                    order_link = page.locator(
+                        ".order_line_items .line_item_title a"
+                    ).first
+                    href_in_order = order_link.get_attribute("href", timeout=3000) or ""
+                    if product_href in href_in_order or href_in_order in product_href:
+                        log.info(
+                            f"[{email}] ✅ 結帳成功（會員中心確認）"
+                            f"（{_time.perf_counter()-t0:.1f}s）：{href_in_order}"
+                        )
+                        br.close()
+                        return "success"
+                    log.warning(
+                        f"[{email}] 會員中心最新訂單商品不符"
+                        f"（期望 {product_href}，實際 {href_in_order}）"
+                    )
+                else:
+                    if page.locator(".order_line_items.order_table_body").count() > 0:
+                        log.info(
+                            f"[{email}] ✅ 結帳成功（會員中心）"
+                            f"（{_time.perf_counter()-t0:.1f}s）"
+                        )
+                        br.close()
+                        return "success"
+            except Exception as e:
+                log.warning(f"[{email}] 會員中心驗證失敗：{e}")
+
+            log.warning(
+                f"[{email}] 無法確認結帳結果，停在：{page.url}"
+                f"（合計 {_time.perf_counter()-t0:.1f}s）"
+            )
             br.close()
-            return "cart"
+            return "failed"
 
     except Exception as e:
         log.error(f"[{email}] Playwright 例外：{e}")
