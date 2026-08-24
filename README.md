@@ -128,26 +128,21 @@ beyblade-funbox-monitor/
 
 ### NOT_NOTIFY_KEYWORDS（完全靜默，1999_monitor）
 
-以下商品**完全不通知、不下單**（比 SKIP_KEYWORDS 更嚴格）：
+以下商品**完全不通知、不下單**：
 
 | 關鍵字 | 備註 |
 |---|---|
 | `BX-43` | 不感興趣，完全忽略 |
 
-### SKIP_KEYWORDS（通知但不自動下單）
+### 1999_monitor 通知分類邏輯
 
-以下商品名稱關鍵字出現時，**發通知但跳過自動下單**：
+`SKIP_KEYWORDS`（通知但不下單的黑名單）**已停用**。目前邏輯為：
 
-| 關鍵字 | 1999_monitor | eslite_monitor |
-|---|---|---|
-| `BX-11` `BX-25` `BX-26` `BX-33` | ✓ | ✓ |
-| `BXG-29` `BXG-33` | ✓ | ✓ |
-| `蜘蛛人` `鋼鐵人` `薩諾斯` `綠惡魔` | ✓ | ✓ |
-| `路克天行者` `達斯維達` | ✓ | ✓ |
-| `暴風天馬` `銀牙烈虎` `烈焰飛鳳` | ✓ | ✓ |
-
-- 1999_monitor：通知受 **1 小時冷卻**限制（同一商品 1 小時內最多通知一次）
-- eslite_monitor：每輪偵測到有庫存即通知（無冷卻）
+| 商品 | 行為 |
+|---|---|
+| 符合 `NOT_NOTIFY_KEYWORDS` | 完全靜默（不通知、不下單） |
+| 符合 `BUY_KEYWORDS` | 通知（1 小時冷卻）+ 自動下單 |
+| 其他所有商品 | 通知（1 小時冷卻），不下單 |
 
 ### 通知冷卻邏輯
 
@@ -173,7 +168,7 @@ beyblade-funbox-monitor/
 | 20 | `ドラシエルシールド` | BX-00 ブースター ドラシエルシールド7-60D |
 | 21–23 | `BX-42` `BX-29` `BX-30` | |
 
-> 優先級：`NOT_NOTIFY_KEYWORDS` > `SKIP_KEYWORDS` > `BUY_KEYWORDS`
+> 優先級：`NOT_NOTIFY_KEYWORDS` > `BUY_KEYWORDS`（`SKIP_KEYWORDS` 黑名單已停用）
 
 ### BUY_KEYWORDS（自動下單目標清單，funbox_monitor）
 
@@ -197,21 +192,12 @@ beyblade-funbox-monitor/
 | 27–29 | `BX-42` `BX-29` `BX-30` |
 | 30–31 | `BXG-22` `BXG-11` |
 
-### SKIP_BUY_KEYWORDS（通知但不下單，funbox_monitor）
-
-| 關鍵字 | 備註 |
-|---|---|
-| `BXG-04` `BXG-20` `BXG-29` `BXG-33` | BXG 系列 |
-| `BX-26` `BX-33` | BX 系列 |
-| `銀牙烈虎` `蜘蛛人` `暴風天馬` `烈焰飛鳳` | 其他 |
-
 ### 自動下單流程（Amazon Pay）
 
 ```
 偵測到需通知的有庫存商品（AUTO_CHECKOUT=true）
   │
   ├─ NOT_NOTIFY_KEYWORDS 符合 → 完全靜默，不通知、不下單
-  ├─ SKIP_KEYWORDS 符合 → 通知（1 小時冷卻），不下單
   ├─ BUY_KEYWORDS 不符合 → 通知（1 小時冷卻），不下單
   │
   └─ BUY_KEYWORDS 符合 + 未曾下單 → Playwright 自動下單
@@ -305,8 +291,6 @@ python 1999_monitor/refresh_session.py
   │
   ├─ SKIP_KEYWORDS 商品（標題含 "APP"）
   │     → 完全靜默，不通知、不下單
-  ├─ SKIP_BUY_KEYWORDS 商品（BXG-04/銀牙烈虎/BX-33/BX-26/BXG-33/BXG-29/BXG-20/蜘蛛人/暴風天馬/烈焰飛鳳）
-  │     → 發通知（1 小時冷卻），跳過自動下單
   ├─ BUY_KEYWORDS 不符合 → 發通知（1 小時冷卻），跳過自動下單
   │
   └─ BUY_KEYWORDS 符合（FUNBOX_EMAIL 帳號有設定即自動下單，無獨立開關）
@@ -490,6 +474,8 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
 ```
 偵測到有庫存商品
   │
+  ├─ SKIP_KEYWORDS 符合 → 通知，跳過自動下單（見下方 SKIP_KEYWORDS 表）
+  │
   ├─ 本次 run 內登入失敗已達 2 次 → 直接返回（僅繼續通知，不再嘗試登入）
   │     （run 結束後 VM 銷毀，下次 run 計數歸零）
   │
@@ -540,6 +526,20 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
 ```
 
 > 誠品購物車**跨裝置、跨登入持久存在**，就算自動結帳失敗，商品仍留在購物車中，使用者可直接點購物車通知信中的連結手動完成結帳。
+
+### SKIP_KEYWORDS（通知但不自動下單，eslite_monitor）
+
+以下商品偵測到有庫存時**發通知**，但**跳過自動下單**：
+
+| 關鍵字 | 備註 |
+|---|---|
+| `BX-11` `BX-25` `BX-26` `BX-33` `BX-43` | BX 系列 |
+| `BXG-29` `BXG-33` | BXG 系列 |
+| `蜘蛛人` `鋼鐵人` `薩諾斯` `綠惡魔` | Marvel 聯名 |
+| `路克天行者` `達斯維達` | Star Wars 聯名 |
+| `暴風天馬` `銀牙烈虎` `烈焰飛鳳` | 其他 |
+
+> 誠品無通知冷卻，每輪有庫存即通知。
 
 ### 下單去重
 
