@@ -91,7 +91,6 @@ _CHECKOUT_STOCK_OUT_TEXTS = ["庫存不足", "數量不足", "已無庫存", "�
 
 # ── 完全靜默的商品關鍵字（不通知、不下單）──────────────
 SKIP_KEYWORDS: list[str] = [
-    "app",
     "APP",
 ]
 
@@ -733,8 +732,7 @@ def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
 
     non_app = [
         p for p in products
-        if "APP" not in p["title"].upper()
-        and not any(kw.upper() in p["title"].upper() for kw in SKIP_BUY_KEYWORDS)
+        if not any(kw.upper() in p["title"].upper() for kw in SKIP_BUY_KEYWORDS)
         and any(kw.upper() in p["title"].upper() for kw in BUY_KEYWORDS)
     ]
     if not non_app:
