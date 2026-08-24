@@ -765,6 +765,9 @@ _CHECKOUT_LABEL_1999 = {
 
     "failed":
         "❌ 下單失敗（未知錯誤）",
+
+    "already_purchased":
+        "⚠ 帳號已購買過此商品（[E06]），已標記為已購買",
 }
 
 
@@ -1370,6 +1373,13 @@ async def _checkout_amazon_pay(
 
             return "success"
 
+        if "[E06]" in body:
+            log.warning(
+                "[1999結帳] ⚠ E06 已購買過（達購買上限），"
+                f"標記為已購買：{titles}"
+            )
+            return "already_purchased"
+
         log.warning(
             "[1999結帳] "
             f"結果不明：{page.url} | "
@@ -1607,6 +1617,16 @@ async def check_once(
                                     purchased[
                                         p["href"]
                                     ] = now.isoformat()
+
+                            elif status == "already_purchased":
+                                for p in cart_added:
+                                    purchased[
+                                        p["href"]
+                                    ] = now.isoformat()
+                                    log.info(
+                                        "E06 標記為已購買，防止重複嘗試："
+                                        f"{p['title']}"
+                                    )
 
                             save_order_state(
                                 purchased
