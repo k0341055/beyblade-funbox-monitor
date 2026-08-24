@@ -94,7 +94,7 @@ beyblade-funbox-monitor/
 | 每次執行輪數 | **30 輪**（間隔 5~8 秒） | **60 輪**（間隔 3~5 秒） | **50 輪**（間隔 3~5 秒） | **35 輪**（間隔 3~5 秒） |
 | 執行時長 / timeout | ~5 分鐘 / 25 min | ~5 分鐘 / 25 min | ~5 分鐘 / 25 min | ~3.5 分鐘 / 25 min |
 | 通知冷卻 | 1 小時冷卻 | 1 小時冷卻 | **無冷卻（每輪有庫存即通知）** | **無冷卻（每輪有庫存即通知）** |
-| 自動下單 | **有**（Amazon Pay，需預存 session） | **有**（3 帳號平行，7-11取貨先付款） | **有**（加入購物車 + 自動結帳） | **有**（加入購物車 + 自動結帳） |
+| 自動下單 | **有**（Amazon Pay，需預存 session） | **有**（3 帳號平行，7-11貨到付款 / 取貨先付款） | **有**（加入購物車 + 自動結帳） | **有**（加入購物車 + 自動結帳） |
 | 觸發頻率 | **每 5 分鐘一次** | **每 5 分鐘一次** | **每 5 分鐘一次** | **每 5 分鐘一次**（獨立 cron-job） |
 
 ---
@@ -307,13 +307,14 @@ python 1999_monitor/refresh_session.py
               ├─ 商品排序同 sequential（購買次數少優先）
               ├─ 最大並發數：PARALLEL_CHECKOUT_LIMIT（預設 6，避免記憶體或被限流）
               │
-              └─ Playwright 結帳 SPA（兩個模式共用）
-                    ├─ page.goto /carts/{token}（wait_until=domcontentloaded, timeout=30s）
-                    ├─ wait_for_selector 等待 7-11 按鈕出現（最長 10s，確保 SPA 渲染）
-                    ├─ 點擊「7-11取貨(先付款)」
-                    ├─ wait_for_selector 等待「立即結帳」按鈕出現（最長 8s，確保付款表單初始化）
-                    ├─ 勾選所有同意條款 checkbox
-                    └─ 點擊立即結帳（精確定位 btn-lg，排除頂部 nav 隱藏連結）
+              └─ Playwright 結帳（兩個模式共用）
+                    ├─ 1. page.goto /carts/{token}（wait_until=domcontentloaded, timeout=30s）
+                    ├─ 2. 點擊「立即結帳」連結，進入結帳頁
+                    ├─ 3. 取消紅利點數折抵（spinbutton 填 0 → 確認，無紅利則自動跳過）
+                    ├─ 4. 選擇配送方式：7-11 貨到付款（優先）→ 7-11 取貨(先付款)（次選）
+                    ├─ 5. 點擊「立即結帳」按鈕，送出訂單
+                    ├─ 6. URL 快速判斷：show_failed → payment_failed｜3DS → 3ds_pending｜order/thank → success
+                    └─ 7. 前往會員中心，比對最新訂單商品 href 確認成功
 ```
 
 ### 購買數量規則
