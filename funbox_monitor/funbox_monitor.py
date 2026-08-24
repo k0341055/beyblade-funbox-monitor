@@ -95,18 +95,18 @@ SKIP_KEYWORDS: list[str] = [
 ]
 
 # ── 通知但不自動購買的商品關鍵字 ──────────────────────
-SKIP_BUY_KEYWORDS: list[str] = [
-    "BXG-04",
-    "銀牙烈虎",
-    "BX-33",
-    "BX-26",
-    "BXG-33",
-    "BXG-29",
-    "BXG-20",
-    "蜘蛛人",
-    "暴風天馬",
-    "烈焰飛鳳",
-]
+# SKIP_BUY_KEYWORDS: list[str] = [
+#     "BXG-04",
+#     "銀牙烈虎",
+#     "BX-33",
+#     "BX-26",
+#     "BXG-33",
+#     "BXG-29",
+#     "BXG-20",
+#     "蜘蛛人",
+#     "暴風天馬",
+#     "烈焰飛鳳",
+# ]
 
 # ── 自動下單目標商品關鍵字（白名單，依志願順序）────────
 # 商品名稱含以下任一關鍵字 → 才執行自動下單
@@ -732,11 +732,10 @@ def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
 
     non_app = [
         p for p in products
-        if not any(kw.upper() in p["title"].upper() for kw in SKIP_BUY_KEYWORDS)
-        and any(kw.upper() in p["title"].upper() for kw in BUY_KEYWORDS)
+        if any(kw.upper() in p["title"].upper() for kw in BUY_KEYWORDS)
     ]
     if not non_app:
-        log.info("所有商品均為 APP 限定、在 SKIP_BUY_KEYWORDS 中或不在 BUY_KEYWORDS 白名單，略過自動購買")
+        log.info("所有商品均不在 BUY_KEYWORDS 白名單，略過自動購買")
         return {}
 
     if MAX_BUY_PRODUCTS > 0 and len(non_app) > MAX_BUY_PRODUCTS:
@@ -808,8 +807,8 @@ def _broadcast_email(products: list, account_results: dict = None) -> None:
         lines.append(f"API 限購：{'無限制' if cap is None else f'{cap} 件/筆'}")
         lines.append(f"實際加購：{get_target_qty(p)} 件/帳號")
         lines.append(f"商品連結：{p['url']}")
-        if any(kw.upper() in p["title"].upper() for kw in SKIP_BUY_KEYWORDS):
-            lines.append("購買狀態：[略過自動購買]")
+        # if any(kw.upper() in p["title"].upper() for kw in SKIP_BUY_KEYWORDS):
+        #     lines.append("購買狀態：[略過自動購買]")
         lines.append("-" * 40)
 
     if account_results:
@@ -866,9 +865,9 @@ def _personal_checkout_email(acct_email: str, result: dict, products: list) -> N
     ]
 
     for p in products:
-        if any(kw.upper() in p["title"].upper() for kw in SKIP_BUY_KEYWORDS):
-            status_str = "— 略過自動購買"
-        elif isinstance(checkout, dict) and p["href"] in checkout:
+        # if any(kw.upper() in p["title"].upper() for kw in SKIP_BUY_KEYWORDS):
+        #     status_str = "— 略過自動購買"
+        if isinstance(checkout, dict) and p["href"] in checkout:
             status_str = _CHECKOUT_LABEL.get(checkout[p["href"]], checkout[p["href"]])
         else:
             status_str = "— 未嘗試"
