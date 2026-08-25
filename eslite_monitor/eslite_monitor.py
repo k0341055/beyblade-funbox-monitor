@@ -65,6 +65,7 @@ BUY_KEYWORDS: list[str] = [
     "UX-21",
     "UX-15",
     "UX-04",
+    "蒼龍勇氣",
     "BX-46",
     "CX-16",
     "CX-04",
