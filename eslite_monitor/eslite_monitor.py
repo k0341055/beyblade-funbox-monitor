@@ -7,8 +7,8 @@ MONITOR_MODE=keyword           → 監控 Holmes 搜尋 API（ESLITE_SEARCH_URL 
 MONITOR_MODE=combined          → 展覽 API + 關鍵字搜尋合併，展覽下架時自動降級
 
 兩種模式共用：登入、購物車、自動下單、Email 通知。
-通知邏輯：每輪偵測到有庫存即通知（無冷卻）；下單去重由 ORDER_STATE_FILE 負責。
-自動下單：單帳號 × 多商品平行；每個商品使用獨立 thread / Playwright / Chromium / context / page / 訂單。
+通知邏輯：同商品 Email 通知冷卻 1 小時；下單去重由 ORDER_STATE_FILE 負責。
+自動下單：僅 BUY_KEYWORDS 白名單商品；單帳號 × 多商品平行。每個 worker 不清空購物車；若購物車已有目標商品就直接結帳，沒有才加入購物車。
 ESLITE_PARALLEL_SESSION_MODE=fresh_login（預設，最接近 Funbox）或 storage（沿用預登入 session）。
 """
 
@@ -39,25 +39,59 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ── 略過通知的商品關鍵字（與 1999_monitor 同步） ──────────────
-# 商品名稱含以下任一關鍵字 → 整輪靜默略過（不通知、不下單）
 SKIP_KEYWORDS: list[str] = [
-    # BX 系列
-    "BX-11", "BX-25", "BX-33", "BX-26", "BX-43",
-    # BXG 系列
-    "BXG-29", "BXG-33",
-    # Marvel 聯名
-    "蜘蛛人", "鋼鐵人", "薩諾斯", "綠惡魔",
-    # Star Wars 聯名
-    "路克天行者", "達斯維達",
-    # 其他
-    "暴風天馬", "銀牙烈虎", "烈焰飛鳳",
+    "BX-11",
+    "BX-25",
+    "BX-33",
+    "BX-26",
+    "BX-43",
+    "BXG-29",
+    "BXG-33",
+    "蜘蛛人",
+    "鋼鐵人",
+    "薩諾斯",
+    "綠惡魔",
+    "路克天行者",
+    "達斯維達",
+    "暴風天馬",
+    "銀牙烈虎",
+    "烈焰飛鳳",
 ]
-# SKIP_KEYWORDS 商品行為：發通知，但跳過自動下單
 
-# ─────────────────────────────────────────────
-# 基底類別（共用邏輯）
-# ─────────────────────────────────────────────
+
+BUY_KEYWORDS: list[str] = [
+    "BX-09",
+    "UX-17",
+    "UX-21",
+    "UX-15",
+    "UX-04",
+    "BX-46",
+    "CX-16",
+    "CX-04",
+    "UX-03",
+    "UX-16",
+    "CX-11",
+    "UX-11",
+    "UX-20",
+    "UX-10",
+    "CX-07",
+    "UX-01",
+    "BX-35",
+    "BX-48",
+    "BX-49",
+    "CX-19",
+    "BX-50",
+    "BX-34",
+    "CX-13",
+    "CX-08",
+    "CX-17",
+    "CX-05",
+    "BX-42",
+    "BX-29",
+    "BX-30",
+    "BXG-22",
+    "BXG-11",
+]
 
 
 class EsliteMonitorBase(ABC):
@@ -69,6 +103,7 @@ class EsliteMonitorBase(ABC):
 
     ESLITE_BASE = "https://www.eslite.com"
     ATHENA_BASE = "https://athena.eslite.com"
+
     _UA = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -76,40 +111,79 @@ class EsliteMonitorBase(ABC):
     )
 
     def __init__(self):
-        self.TW_TZ = timezone(timedelta(hours=8))
+        self.TW_TZ = timezone(
+            timedelta(hours=8)
+        )
 
-        _extra_env = os.environ.get("ESLITE_EXTRA_PRODUCTS", "").strip()
+        _extra_env = os.environ.get(
+            "ESLITE_EXTRA_PRODUCTS",
+            "",
+        ).strip()
+
         self.EXTRA_PRODUCT_GUIDS = [
             g.strip()
             for g in _extra_env.split(",")
             if g.strip()
         ]
-        self.CHECK_ROUNDS = int(os.environ.get("CHECK_ROUNDS", "1"))
 
-        self.GMAIL_SENDER = os.environ["GMAIL_SENDER"]
-        self.GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
+        self.CHECK_ROUNDS = int(
+            os.environ.get(
+                "CHECK_ROUNDS",
+                "1",
+            )
+        )
+
+        self.GMAIL_SENDER = os.environ[
+            "GMAIL_SENDER"
+        ]
+
+        self.GMAIL_PASSWORD = os.environ[
+            "GMAIL_PASSWORD"
+        ]
+
         self.GMAIL_RECIPIENTS = [
             a.strip()
-            for a in os.environ["GMAIL_RECIPIENTS"].split(",")
+            for a in os.environ[
+                "GMAIL_RECIPIENTS"
+            ].split(",")
             if a.strip()
         ]
 
         self.AUTO_CHECKOUT = (
-            os.environ.get("AUTO_CHECKOUT", "true").lower() != "false"
+            os.environ.get(
+                "AUTO_CHECKOUT",
+                "true",
+            ).lower()
+            != "false"
         )
-        self.ESLITE_ACCOUNT = os.environ.get("ESLITE_ACCOUNT", "")
-        self.ESLITE_PASSWORD = os.environ.get("ESLITE_PASSWORD", "")
-        self.CHECKOUT_CITY = os.environ.get("CHECKOUT_CITY", "新竹市")
+
+        self.ESLITE_ACCOUNT = os.environ.get(
+            "ESLITE_ACCOUNT",
+            "",
+        )
+
+        self.ESLITE_PASSWORD = os.environ.get(
+            "ESLITE_PASSWORD",
+            "",
+        )
+
+        self.CHECKOUT_CITY = os.environ.get(
+            "CHECKOUT_CITY",
+            "新竹市",
+        )
+
         self.CHECKOUT_STORE_CODE = os.environ.get(
-            "CHECKOUT_STORE_CODE", "B060"
+            "CHECKOUT_STORE_CODE",
+            "B060",
         )
 
-        # 本輪最多選幾種商品進行自動下單
         self.CHECKOUT_MAX = int(
-            os.environ.get("CHECKOUT_MAX", "3")
+            os.environ.get(
+                "CHECKOUT_MAX",
+                "3",
+            )
         )
 
-        # 同時最多啟動幾個「商品 checkout worker」
         self.PARALLEL_CHECKOUT_LIMIT = int(
             os.environ.get(
                 "PARALLEL_CHECKOUT_LIMIT",
@@ -117,33 +191,35 @@ class EsliteMonitorBase(ABC):
             )
         )
 
-        # fresh_login：
-        #   最接近 Funbox。
-        #   每個商品 thread 都建立全新的 browser/context，
-        #   再使用誠品原本登入流程登入帳號。
-        #
-        # storage：
-        #   每個商品仍有自己的 browser/context/page，
-        #   但都從 generate_session.py 的 storage_state 建立登入狀態。
-        #
-        # 若 GitHub Actions 重新登入容易觸發 OTP，建議改成 storage。
-        self.PARALLEL_SESSION_MODE = os.environ.get(
-            "ESLITE_PARALLEL_SESSION_MODE",
-            "fresh_login",
-        ).strip().lower()
+        self.PARALLEL_SESSION_MODE = (
+            os.environ.get(
+                "ESLITE_PARALLEL_SESSION_MODE",
+                "fresh_login",
+            )
+            .strip()
+            .lower()
+        )
 
         if self.PARALLEL_SESSION_MODE not in (
             "fresh_login",
             "storage",
         ):
             log.warning(
-                f"未知 ESLITE_PARALLEL_SESSION_MODE="
-                f"{self.PARALLEL_SESSION_MODE}，改用 fresh_login"
+                "未知 ESLITE_PARALLEL_SESSION_MODE="
+                f"{self.PARALLEL_SESSION_MODE}，"
+                "改用 fresh_login"
             )
-            self.PARALLEL_SESSION_MODE = "fresh_login"
+
+            self.PARALLEL_SESSION_MODE = (
+                "fresh_login"
+            )
 
         self.HEADLESS = (
-            os.environ.get("HEADLESS", "true").lower() != "false"
+            os.environ.get(
+                "HEADLESS",
+                "true",
+            ).lower()
+            != "false"
         )
 
         self.STORAGE_STATE_FILE = Path(
@@ -152,10 +228,27 @@ class EsliteMonitorBase(ABC):
                 "eslite_storage_state.json",
             )
         )
+
         self.ORDER_STATE_FILE = Path(
             os.environ.get(
                 "ORDER_STATE_FILE",
                 "eslite_order_state.json",
+            )
+        )
+
+        self.NOTIFY_COOLDOWN = timedelta(
+            hours=float(
+                os.environ.get(
+                    "NOTIFY_COOLDOWN_HOURS",
+                    "1",
+                )
+            )
+        )
+
+        self.NOTIFY_STATE_FILE = Path(
+            os.environ.get(
+                "NOTIFY_STATE_FILE",
+                "eslite_notify_state.json",
             )
         )
 
@@ -167,35 +260,38 @@ class EsliteMonitorBase(ABC):
             ).split(",")
             if r.strip()
         ]
+
         self.ORDER_RECIPIENTS = (
-            _recip_raw or self.GMAIL_RECIPIENTS[:1]
+            _recip_raw
+            or self.GMAIL_RECIPIENTS[:1]
         )
 
-        self.EVENT_PAGE_URL = os.environ.get(
-            "ESLITE_EVENT_URL",
-            "",
-        ).strip()
+        self.EVENT_PAGE_URL = (
+            os.environ.get(
+                "ESLITE_EVENT_URL",
+                "",
+            ).strip()
+        )
 
-        # 記憶體內追蹤（僅本次執行有效）
-        #
-        # 商品只要曾成功加入某個 checkout worker 的購物車，
-        # 本次 run 不再重複處理。
-        self._cart_added_guids: set = set()
+        self._session_file_lock = (
+            threading.Lock()
+        )
 
-        # storage_state 與登入失敗計數可能被多個 checkout thread 存取
-        self._session_file_lock = threading.Lock()
-        self._login_fail_lock = threading.Lock()
+        self._login_fail_lock = (
+            threading.Lock()
+        )
+
         self._login_required_notified = False
 
-        # 登入失敗計數
         self._login_fail_count: int = 0
         self.LOGIN_FAIL_MAX: int = 2
 
-        # 已購買商品關鍵字
-        _purchased_env = os.environ.get(
-            "ESLITE_PURCHASED_NAMES",
-            "",
-        ).strip()
+        _purchased_env = (
+            os.environ.get(
+                "ESLITE_PURCHASED_NAMES",
+                "",
+            ).strip()
+        )
 
         self.PURCHASED_NAMES: list = [
             n.strip().upper()
@@ -203,31 +299,60 @@ class EsliteMonitorBase(ABC):
             if n.strip()
         ]
 
-    def _is_purchased(self, product: dict) -> bool:
-        """判斷商品名稱是否符合已購買關鍵字（大小寫不分）。"""
-        name = product.get("name", "").upper()
+    def _is_purchased(
+        self,
+        product: dict,
+    ) -> bool:
+
+        name = (
+            product.get(
+                "name",
+                "",
+            ).upper()
+        )
+
         return any(
             kw in name
             for kw in self.PURCHASED_NAMES
         )
 
-    # ─────────────────────────────────────────
-    # 抽象介面
-    # ─────────────────────────────────────────
+    def _is_buy_whitelisted(
+        self,
+        product: dict,
+    ) -> bool:
+
+        name = (
+            product.get(
+                "name",
+                "",
+            ).upper()
+        )
+
+        return any(
+            kw.upper() in name
+            for kw in BUY_KEYWORDS
+        )
 
     @abstractmethod
-    def fetch_in_stock_products(self, page) -> list:
-        """回傳當輪所有有庫存商品的 dict 清單。"""
+    def fetch_in_stock_products(
+        self,
+        page,
+    ) -> list:
+        pass
 
-    # ─────────────────────────────────────────
-    # 工具
-    # ─────────────────────────────────────────
+    def _mask(
+        self,
+        email: str,
+    ) -> str:
 
-    def _mask(self, email: str) -> str:
         if "@" not in email:
             return "***"
 
-        local, domain = email.split("@", 1)
+        local, domain = email.split(
+            "@",
+            1,
+        )
+
         return f"{local[0]}***@{domain}"
 
     def _send_email(
@@ -236,6 +361,7 @@ class EsliteMonitorBase(ABC):
         subject: str,
         body: str,
     ):
+
         try:
             msg = MIMEText(
                 body,
@@ -245,13 +371,16 @@ class EsliteMonitorBase(ABC):
 
             msg["Subject"] = subject
             msg["From"] = self.GMAIL_SENDER
-            msg["To"] = ", ".join(recipients)
+            msg["To"] = ", ".join(
+                recipients
+            )
 
             with smtplib.SMTP_SSL(
                 "smtp.gmail.com",
                 465,
                 timeout=15,
             ) as s:
+
                 s.login(
                     self.GMAIL_SENDER,
                     self.GMAIL_PASSWORD,
@@ -264,21 +393,22 @@ class EsliteMonitorBase(ABC):
                 )
 
             log.info(
-                f"Email 發送成功 → "
+                "Email 發送成功 → "
                 f"{[self._mask(r) for r in recipients]}"
             )
 
         except Exception as e:
+
             log.error(
                 f"Email 發送失敗：{e}"
             )
 
-    # ─────────────────────────────────────────
-    # 下單狀態
-    # ─────────────────────────────────────────
+    def _load_order_state(
+        self,
+    ) -> dict:
 
-    def _load_order_state(self) -> dict:
         if self.ORDER_STATE_FILE.exists():
+
             try:
                 return json.loads(
                     self.ORDER_STATE_FILE.read_text(
@@ -298,6 +428,7 @@ class EsliteMonitorBase(ABC):
         self,
         ordered: dict,
     ):
+
         self.ORDER_STATE_FILE.write_text(
             json.dumps(
                 {
@@ -312,27 +443,108 @@ class EsliteMonitorBase(ABC):
             encoding="utf-8",
         )
 
+    def _load_notify_state(
+        self,
+    ) -> dict:
+
+        if self.NOTIFY_STATE_FILE.exists():
+
+            try:
+                return json.loads(
+                    self.NOTIFY_STATE_FILE.read_text(
+                        encoding="utf-8"
+                    )
+                ).get(
+                    "notified",
+                    {},
+                )
+
+            except Exception as e:
+
+                log.warning(
+                    "讀取通知冷卻狀態失敗，"
+                    f"視為無冷卻：{e}"
+                )
+
+        return {}
+
+    def _save_notify_state(
+        self,
+        notified: dict,
+    ):
+
+        try:
+            self.NOTIFY_STATE_FILE.write_text(
+                json.dumps(
+                    {
+                        "notified": notified,
+                        "updated": datetime.now(
+                            self.TW_TZ
+                        ).isoformat(),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+        except Exception as e:
+
+            log.warning(
+                f"儲存通知冷卻狀態失敗：{e}"
+            )
+
+    def _parse_notify_ts(
+        self,
+        ts: str,
+    ) -> datetime:
+
+        dt = datetime.fromisoformat(
+            ts
+        )
+
+        if dt.tzinfo is None:
+
+            dt = dt.replace(
+                tzinfo=self.TW_TZ
+            )
+
+        return dt
+
     def _calc_order_qty(
         self,
         product: dict,
     ) -> int:
-        """
-        依帳號上限、每單上限、庫存三者取最小值，
-        至少 1。
-        """
 
-        qty = product.get("stock") or 1
+        qty = (
+            product.get("stock")
+            or 1
+        )
 
-        if product.get("order_qty_limit"):
+        if product.get(
+            "order_qty_limit"
+        ):
+
             qty = min(
                 qty,
-                int(product["order_qty_limit"]),
+                int(
+                    product[
+                        "order_qty_limit"
+                    ]
+                ),
             )
 
-        if product.get("account_qty_limit"):
+        if product.get(
+            "account_qty_limit"
+        ):
+
             qty = min(
                 qty,
-                int(product["account_qty_limit"]),
+                int(
+                    product[
+                        "account_qty_limit"
+                    ]
+                ),
             )
 
         return max(
@@ -340,26 +552,26 @@ class EsliteMonitorBase(ABC):
             qty,
         )
 
-    # ─────────────────────────────────────────
-    # 平行下單共用狀態
-    # ─────────────────────────────────────────
+    def _get_login_fail_count(
+        self,
+    ) -> int:
 
-    def _get_login_fail_count(self) -> int:
         with self._login_fail_lock:
             return self._login_fail_count
 
-    def _record_login_failure(self) -> int:
+    def _record_login_failure(
+        self,
+    ) -> int:
+
         with self._login_fail_lock:
+
             self._login_fail_count += 1
+
             return self._login_fail_count
 
-    def _load_storage_state_data(self):
-        """
-        以 JSON dict 讀取 storage_state。
-
-        平行 worker 會各自拿到 snapshot，
-        不讓多個 Browser 同時直接讀寫同一個 JSON。
-        """
+    def _load_storage_state_data(
+        self,
+    ):
 
         with self._session_file_lock:
 
@@ -374,22 +586,18 @@ class EsliteMonitorBase(ABC):
                 )
 
             except Exception as e:
+
                 log.warning(
-                    f"讀取 session state 失敗，"
+                    "讀取 session state 失敗，"
                     f"將重新登入：{e}"
                 )
+
                 return None
 
     def _persist_storage_state(
         self,
         ctx,
     ):
-        """
-        將目前 context storage state
-        原子化寫回共用檔案。
-
-        Playwright context 本身仍只在建立它的 thread 使用。
-        """
 
         try:
             state = ctx.storage_state()
@@ -418,28 +626,25 @@ class EsliteMonitorBase(ABC):
                 )
 
             log.info(
-                f"Session 狀態已更新："
+                "Session 狀態已更新："
                 f"{self.STORAGE_STATE_FILE}"
             )
 
         except Exception as e:
+
             log.warning(
                 f"更新 session 狀態失敗：{e}"
             )
-
-    # ─────────────────────────────────────────
-    # 個別商品 API
-    # ─────────────────────────────────────────
 
     def _fetch_single_product(
         self,
         page,
         guid: str,
     ):
-        """呼叫單品 API，有庫存回傳 dict，否則 None。"""
 
         api_url = (
-            f"{self.ATHENA_BASE}/api/v1/products/{guid}"
+            f"{self.ATHENA_BASE}"
+            f"/api/v1/products/{guid}"
         )
 
         try:
@@ -449,14 +654,23 @@ class EsliteMonitorBase(ABC):
                 timeout=20000,
             )
 
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(
+                1000
+            )
 
             try:
-                raw = page.inner_text("pre")
-            except Exception:
-                raw = page.inner_text("body")
+                raw = page.inner_text(
+                    "pre"
+                )
 
-            data = json.loads(raw)
+            except Exception:
+                raw = page.inner_text(
+                    "body"
+                )
+
+            data = json.loads(
+                raw
+            )
 
             name = data.get(
                 "name",
@@ -471,7 +685,10 @@ class EsliteMonitorBase(ABC):
             )
 
             stock = int(
-                data.get("stock") or 0
+                data.get(
+                    "stock"
+                )
+                or 0
             )
 
             btn_status = data.get(
@@ -486,10 +703,13 @@ class EsliteMonitorBase(ABC):
             )
 
             if not in_stock:
+
                 log.info(
                     f"個別商品無庫存：{name}"
-                    f"（{btn_status}，stock={stock}）"
+                    f"（{btn_status}，"
+                    f"stock={stock}）"
                 )
+
                 return None
 
             acct_lim = data.get(
@@ -503,9 +723,14 @@ class EsliteMonitorBase(ABC):
             log.info(
                 f"有庫存 → {name}"
                 f"（{product_guid}）"
-                f" | 庫存:{stock} 件 | "
-                f"{'帳號上限:'+str(acct_lim)+'件' if acct_lim else '無限購'}"
-                f" | {btn_status}"
+                f" | 庫存:{stock} 件"
+                " | "
+                + (
+                    f"帳號上限:{acct_lim}件"
+                    if acct_lim
+                    else "無限購"
+                )
+                + f" | {btn_status}"
             )
 
             return {
@@ -516,21 +741,19 @@ class EsliteMonitorBase(ABC):
                 "account_qty_limit": acct_lim,
                 "order_qty_limit": ord_lim,
                 "url": (
-                    f"{self.ESLITE_BASE}/product/"
-                    f"{product_guid}"
+                    f"{self.ESLITE_BASE}"
+                    f"/product/{product_guid}"
                 ),
             }
 
         except Exception as e:
+
             log.error(
-                f"個別商品查詢失敗："
+                "個別商品查詢失敗："
                 f"{guid} | {e}"
             )
-            return None
 
-    # ─────────────────────────────────────────
-    # 登入管理
-    # ─────────────────────────────────────────
+            return None
 
     def _is_logged_in(
         self,
@@ -544,7 +767,9 @@ class EsliteMonitorBase(ABC):
                 timeout=15000,
             )
 
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(
+                2000
+            )
 
             if "/login" in page.url:
                 return False
@@ -584,15 +809,18 @@ class EsliteMonitorBase(ABC):
             not self.ESLITE_ACCOUNT
             or not self.ESLITE_PASSWORD
         ):
+
             log.warning(
                 "未設定 ESLITE_ACCOUNT / "
-                "ESLITE_PASSWORD，跳過自動下單"
+                "ESLITE_PASSWORD，"
+                "跳過自動下單"
             )
+
             return False
 
         try:
             log.info(
-                f"登入誠品帳號："
+                "登入誠品帳號："
                 f"{self.ESLITE_ACCOUNT}"
             )
 
@@ -602,7 +830,9 @@ class EsliteMonitorBase(ABC):
                 timeout=20000,
             )
 
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(
+                2000
+            )
 
             page.get_by_role(
                 "textbox",
@@ -633,7 +863,9 @@ class EsliteMonitorBase(ABC):
                 name="登入",
             ).click()
 
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(
+                1500
+            )
 
             if not self.HEADLESS:
 
@@ -655,7 +887,10 @@ class EsliteMonitorBase(ABC):
                     pass
 
             else:
-                page.wait_for_timeout(4000)
+
+                page.wait_for_timeout(
+                    4000
+                )
 
             sms_indicators = [
                 "verify",
@@ -677,6 +912,7 @@ class EsliteMonitorBase(ABC):
                         "input[name*='otp'], "
                         "input[name*='sms']"
                     ):
+
                         sms_detected = True
 
                 except Exception:
@@ -703,8 +939,8 @@ class EsliteMonitorBase(ABC):
                         )
 
                         log.info(
-                            "簡訊驗證完成，session "
-                            f"已儲存至 "
+                            "簡訊驗證完成，"
+                            "session 已儲存至 "
                             f"{self.STORAGE_STATE_FILE}"
                         )
 
@@ -712,7 +948,8 @@ class EsliteMonitorBase(ABC):
 
                 log.warning(
                     "需要簡訊驗證碼，"
-                    "無法在 GitHub Actions 中自動完成"
+                    "無法在 GitHub Actions 中"
+                    "自動完成"
                 )
 
                 self._record_login_failure()
@@ -727,22 +964,27 @@ class EsliteMonitorBase(ABC):
                     page.screenshot(
                         path="debug_login.png"
                     )
+
                 except Exception:
                     pass
 
                 self._record_login_failure()
 
                 log.error(
-                    "登入失敗（仍停在登入頁）："
+                    "登入失敗"
+                    "（仍停在登入頁）："
                     f"{page.url}"
                 )
 
                 return False
 
-            self._persist_storage_state(ctx)
+            self._persist_storage_state(
+                ctx
+            )
 
             log.info(
-                "登入成功，session 已儲存至 "
+                "登入成功，"
+                "session 已儲存至 "
                 f"{self.STORAGE_STATE_FILE}"
             )
 
@@ -764,14 +1006,20 @@ class EsliteMonitorBase(ABC):
         ctx,
     ) -> bool:
 
-        if self._is_logged_in(page):
+        if self._is_logged_in(
+            page
+        ):
+
             log.info(
-                "Session 有效，已登入誠品"
+                "Session 有效，"
+                "已登入誠品"
             )
+
             return True
 
         log.info(
-            "Session 已失效，嘗試重新登入..."
+            "Session 已失效，"
+            "嘗試重新登入..."
         )
 
         return self._do_login(
@@ -779,55 +1027,77 @@ class EsliteMonitorBase(ABC):
             ctx,
         )
 
-    # ─────────────────────────────────────────
-    # 購物車與結帳
-    # ─────────────────────────────────────────
-
-    def _clear_cart(
+    def _cart_contains_product(
         self,
         page,
-    ):
+        guid: str,
+    ) -> bool:
+        """
+        檢查目前登入 session 的購物車是否已經有指定 GUID。
+
+        不做任何刪除動作。
+        若上一輪已成功加車但結帳失敗，
+        下一輪可直接利用購物車內既有商品重新結帳。
+
+        回傳 True 時，page 會停在 /cart。
+        """
 
         try:
             page.goto(
                 f"{self.ESLITE_BASE}/cart",
                 wait_until="domcontentloaded",
-                timeout=20000,
+                timeout=15000,
             )
 
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(
+                700
+            )
 
-            for _ in range(30):
+            selectors = [
+                f'a[href*="/product/{guid}"]',
+                f'a[href*="{guid}"]',
+                f'[data-product-guid="{guid}"]',
+                f'[data-guid="{guid}"]',
+            ]
 
-                btn = (
-                    page.query_selector(
-                        "button:has-text('刪除')"
+            for selector in selectors:
+
+                try:
+                    node = page.query_selector(
+                        selector
                     )
-                    or page.query_selector(
-                        "[aria-label*='刪除']"
-                    )
-                    or page.query_selector(
-                        "[class*='remove']"
-                    )
-                )
 
-                if not btn:
-                    break
+                    if node:
 
-                btn.click()
+                        log.info(
+                            f"[{guid}] "
+                            "購物車已存在目標商品，"
+                            "略過再次加入購物車"
+                        )
 
-                page.wait_for_timeout(1000)
+                        return True
+
+                except Exception:
+                    pass
 
             log.info(
-                "購物車已清空"
+                f"[{guid}] "
+                "購物車未找到目標商品，"
+                "需要重新加入購物車"
             )
+
+            return False
 
         except Exception as e:
 
             log.warning(
-                "清空購物車發生錯誤"
-                f"（繼續）：{e}"
+                f"[{guid}] "
+                "檢查購物車失敗，"
+                "改走重新加車流程："
+                f"{e}"
             )
+
+            return False
 
     def _add_to_cart(
         self,
@@ -837,7 +1107,8 @@ class EsliteMonitorBase(ABC):
     ) -> bool:
 
         url = (
-            f"{self.ESLITE_BASE}/product/{guid}"
+            f"{self.ESLITE_BASE}"
+            f"/product/{guid}"
         )
 
         try:
@@ -860,11 +1131,13 @@ class EsliteMonitorBase(ABC):
             if qty > 1:
 
                 try:
-                    qty_input = page.query_selector(
-                        "input[type='number'][class*='qty'], "
-                        "input[type='number'][class*='quantity'], "
-                        "input[type='number'][name*='qty'], "
-                        "input[type='number']"
+                    qty_input = (
+                        page.query_selector(
+                            "input[type='number'][class*='qty'], "
+                            "input[type='number'][class*='quantity'], "
+                            "input[type='number'][name*='qty'], "
+                            "input[type='number']"
+                        )
                     )
 
                     if qty_input:
@@ -876,7 +1149,8 @@ class EsliteMonitorBase(ABC):
                         )
 
                         log.info(
-                            f"已設定購買數量：{qty}"
+                            "已設定購買數量："
+                            f"{qty}"
                         )
 
                 except Exception:
@@ -910,10 +1184,11 @@ class EsliteMonitorBase(ABC):
                 try:
                     page.screenshot(
                         path=(
-                            f"debug_product_"
+                            "debug_product_"
                             f"{guid[:8]}.png"
                         )
                     )
+
                 except Exception:
                     pass
 
@@ -922,7 +1197,8 @@ class EsliteMonitorBase(ABC):
             if not btn.is_enabled():
 
                 log.warning(
-                    "加入購物車按鈕為禁用狀態："
+                    "加入購物車按鈕"
+                    "為禁用狀態："
                     f"{guid}"
                 )
 
@@ -930,26 +1206,34 @@ class EsliteMonitorBase(ABC):
 
             btn.click()
 
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(
+                2000
+            )
 
             try:
-                confirm = page.query_selector(
-                    "button:has-text('確認')"
+                confirm = (
+                    page.query_selector(
+                        "button:has-text('確認')"
+                    )
                 )
 
                 if (
                     confirm
                     and confirm.is_visible()
                 ):
+
                     confirm.click()
 
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(
+                        500
+                    )
 
             except Exception:
                 pass
 
             log.info(
-                f"已加入購物車：{guid}"
+                "已加入購物車："
+                f"{guid}"
                 f"（數量 {qty}）"
             )
 
@@ -958,7 +1242,7 @@ class EsliteMonitorBase(ABC):
         except Exception as e:
 
             log.error(
-                f"加入購物車失敗："
+                "加入購物車失敗："
                 f"{guid} | {e}"
             )
 
@@ -967,22 +1251,34 @@ class EsliteMonitorBase(ABC):
     def _checkout(
         self,
         page,
+        cart_already_open: bool = False,
     ):
         """
         誠品門市取貨 + ATM 轉帳結帳。
 
-        成功回傳訂單編號，
-        失敗回傳 None。
+        cart_already_open=True：
+        代表前一步已經在 /cart 找到目標商品，
+        不重新載入購物車頁。
         """
 
         try:
-            page.goto(
-                f"{self.ESLITE_BASE}/cart",
-                wait_until="domcontentloaded",
-                timeout=20000,
-            )
+            if not cart_already_open:
 
-            page.wait_for_timeout(3000)
+                page.goto(
+                    f"{self.ESLITE_BASE}/cart",
+                    wait_until="domcontentloaded",
+                    timeout=20000,
+                )
+
+                page.wait_for_timeout(
+                    3000
+                )
+
+            else:
+
+                page.wait_for_timeout(
+                    300
+                )
 
             checkout_btn = (
                 page.query_selector(
@@ -1009,6 +1305,7 @@ class EsliteMonitorBase(ABC):
                     page.screenshot(
                         path="debug_cart.png"
                     )
+
                 except Exception:
                     pass
 
@@ -1016,22 +1313,26 @@ class EsliteMonitorBase(ABC):
 
             checkout_btn.click()
 
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(
+                2000
+            )
 
-            # ── 原本誠品流程：門市取貨 ──
             page.get_by_title(
                 "誠品門市取貨"
             ).click()
 
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(
+                1500
+            )
 
             page.evaluate(
                 "window.scrollBy(0, 400)"
             )
 
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(
+                1000
+            )
 
-            # ── 原本誠品流程：選縣市 ──
             try:
                 page.wait_for_selector(
                     "select[name='recipientCity'], "
@@ -1056,13 +1357,16 @@ class EsliteMonitorBase(ABC):
 
                 page.get_by_role(
                     "combobox"
-                ).nth(2).select_option(
+                ).nth(
+                    2
+                ).select_option(
                     self.CHECKOUT_CITY
                 )
 
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(
+                1000
+            )
 
-            # ── 原本誠品流程：選門市 ──
             page.wait_for_selector(
                 "select[name='recipientEsliteStore']",
                 timeout=8000,
@@ -1074,16 +1378,18 @@ class EsliteMonitorBase(ABC):
                 self.CHECKOUT_STORE_CODE
             )
 
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(
+                1000
+            )
 
-            # ── 原本誠品流程：ATM ──
             page.get_by_title(
                 "ATM轉帳"
             ).click()
 
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(
+                1000
+            )
 
-            # ── 原本誠品流程：確認結帳 ──
             page.get_by_role(
                 "button",
                 name="確認結帳",
@@ -1094,10 +1400,12 @@ class EsliteMonitorBase(ABC):
                 timeout=20000,
             )
 
-            params = urllib.parse.parse_qs(
-                urllib.parse.urlparse(
-                    page.url
-                ).query
+            params = (
+                urllib.parse.parse_qs(
+                    urllib.parse.urlparse(
+                        page.url
+                    ).query
+                )
             )
 
             order_id = params.get(
@@ -1108,7 +1416,8 @@ class EsliteMonitorBase(ABC):
             if order_id:
 
                 log.info(
-                    "結帳成功！訂單編號："
+                    "結帳成功！"
+                    "訂單編號："
                     f"{order_id}"
                 )
 
@@ -1132,14 +1441,11 @@ class EsliteMonitorBase(ABC):
                 page.goto(
                     "about:blank"
                 )
+
             except Exception:
                 pass
 
             return None
-
-    # ─────────────────────────────────────────
-    # Email 通知
-    # ─────────────────────────────────────────
 
     def _notify_products(
         self,
@@ -1160,16 +1466,20 @@ class EsliteMonitorBase(ABC):
 
         if regular:
 
-            count = len(regular)
+            count = len(
+                regular
+            )
 
             subject = (
-                f"【誠品有貨了！】"
+                "【誠品有貨了！】"
                 f"偵測到 {count} 件商品"
             )
 
             lines = [
-                f"誠品戰鬥陀螺專區偵測到共 "
-                f"{count} 件有庫存商品",
+                (
+                    "誠品戰鬥陀螺專區"
+                    f"偵測到共 {count} 件有庫存商品"
+                ),
                 (
                     "偵測時間："
                     f"{datetime.now(self.TW_TZ).strftime('%Y-%m-%d %H:%M:%S')}"
@@ -1177,11 +1487,11 @@ class EsliteMonitorBase(ABC):
                 ),
                 "",
                 (
-                    f">>> 立即結帳："
+                    ">>> 立即結帳："
                     f"{self.ESLITE_BASE}/cart/step2"
                 ),
                 (
-                    f">>> 查看購物車："
+                    ">>> 查看購物車："
                     f"{self.ESLITE_BASE}/cart"
                 ),
                 "",
@@ -1192,6 +1502,7 @@ class EsliteMonitorBase(ABC):
                 regular,
                 1,
             ):
+
                 acct_lim = p.get(
                     "account_qty_limit"
                 )
@@ -1225,10 +1536,11 @@ class EsliteMonitorBase(ABC):
                 ]
 
             if self.EVENT_PAGE_URL:
+
                 lines += [
                     "",
                     (
-                        f"完整專區頁："
+                        "完整專區頁："
                         f"{self.EVENT_PAGE_URL}"
                     ),
                 ]
@@ -1236,12 +1548,16 @@ class EsliteMonitorBase(ABC):
             self._send_email(
                 self.GMAIL_RECIPIENTS,
                 subject,
-                "\n".join(lines),
+                "\n".join(
+                    lines
+                ),
             )
 
         if purchased:
 
-            count = len(purchased)
+            count = len(
+                purchased
+            )
 
             subject = (
                 "【誠品有貨！已購買商品】"
@@ -1303,10 +1619,11 @@ class EsliteMonitorBase(ABC):
                 ]
 
             if self.EVENT_PAGE_URL:
+
                 lines += [
                     "",
                     (
-                        f"完整專區頁："
+                        "完整專區頁："
                         f"{self.EVENT_PAGE_URL}"
                     ),
                 ]
@@ -1314,7 +1631,9 @@ class EsliteMonitorBase(ABC):
             self._send_email(
                 self.ORDER_RECIPIENTS,
                 subject,
-                "\n".join(lines),
+                "\n".join(
+                    lines
+                ),
             )
 
     def _notify_cart_added(
@@ -1322,7 +1641,9 @@ class EsliteMonitorBase(ABC):
         products: list,
     ):
 
-        count = len(products)
+        count = len(
+            products
+        )
 
         subject = (
             "【誠品購物車已更新！】"
@@ -1330,10 +1651,12 @@ class EsliteMonitorBase(ABC):
             "請前往結帳"
         )
 
-        now_str = datetime.now(
-            self.TW_TZ
-        ).strftime(
-            "%Y-%m-%d %H:%M:%S"
+        now_str = (
+            datetime.now(
+                self.TW_TZ
+            ).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
         )
 
         lines = [
@@ -1344,11 +1667,11 @@ class EsliteMonitorBase(ABC):
             f"時間：{now_str}（台灣時間）",
             "",
             (
-                f">>> 立即結帳（一鍵進入）："
+                ">>> 立即結帳（一鍵進入）："
                 f"{self.ESLITE_BASE}/cart/step2"
             ),
             (
-                f">>> 查看購物車："
+                ">>> 查看購物車："
                 f"{self.ESLITE_BASE}/cart"
             ),
             "",
@@ -1368,7 +1691,9 @@ class EsliteMonitorBase(ABC):
                 "order_qty_limit"
             )
 
-            qty = self._calc_order_qty(p)
+            qty = self._calc_order_qty(
+                p
+            )
 
             lines += [
                 f"\n【商品 {i}】",
@@ -1401,7 +1726,9 @@ class EsliteMonitorBase(ABC):
         self._send_email(
             self.ORDER_RECIPIENTS,
             subject,
-            "\n".join(lines),
+            "\n".join(
+                lines
+            ),
         )
 
     def _notify_order(
@@ -1410,7 +1737,9 @@ class EsliteMonitorBase(ABC):
         order_id: str,
     ):
 
-        count = len(products)
+        count = len(
+            products
+        )
 
         subject = (
             "【誠品自動下單成功！】"
@@ -1418,10 +1747,12 @@ class EsliteMonitorBase(ABC):
             f"｜訂單 {order_id}"
         )
 
-        now_str = datetime.now(
-            self.TW_TZ
-        ).strftime(
-            "%Y-%m-%d %H:%M:%S"
+        now_str = (
+            datetime.now(
+                self.TW_TZ
+            ).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
         )
 
         lines = [
@@ -1433,7 +1764,7 @@ class EsliteMonitorBase(ABC):
                 "（請記得在期限內完成匯款）"
             ),
             (
-                f"取貨門市："
+                "取貨門市："
                 f"{self.CHECKOUT_CITY}－"
                 f"{self.CHECKOUT_STORE_CODE}"
             ),
@@ -1460,7 +1791,7 @@ class EsliteMonitorBase(ABC):
         lines += [
             "",
             (
-                f"查看訂單："
+                "查看訂單："
                 f"{self.ESLITE_BASE}/member/orders"
             ),
         ]
@@ -1468,54 +1799,60 @@ class EsliteMonitorBase(ABC):
         self._send_email(
             self.ORDER_RECIPIENTS,
             subject,
-            "\n".join(lines),
+            "\n".join(
+                lines
+            ),
         )
 
-    def _notify_login_required(self):
+    def _notify_login_required(
+        self,
+    ):
 
         subject = (
             "【誠品監控警告】"
             "需要手動重新登入"
         )
 
-        body = "\n".join([
-            (
-                "誠品自動下單失敗："
-                "登入時偵測到簡訊驗證要求。"
-            ),
-            "",
-            (
-                "請在本機執行以下步驟"
-                "恢復自動下單："
-            ),
-            (
-                "  1. cd eslite_monitor "
-                "&& python generate_session.py"
-            ),
-            (
-                "  2. 在彈出的瀏覽器中"
-                "完成登入/驗證"
-            ),
-            (
-                "  3. gh secret set "
-                "ESLITE_STORAGE_STATE_B64 \\"
-            ),
-            (
-                '       --body "$(base64 -i '
-                "eslite_storage_state.json "
-                "| tr -d '\\n')\" \\"
-            ),
-            (
-                "       --repo "
-                "k0341055/beyblade-funbox-monitor"
-            ),
-            "",
-            (
-                "本次偵測時間："
-                f"{datetime.now(self.TW_TZ).strftime('%Y-%m-%d %H:%M:%S')}"
-                "（台灣時間）"
-            ),
-        ])
+        body = "\n".join(
+            [
+                (
+                    "誠品自動下單失敗："
+                    "登入時偵測到簡訊驗證要求。"
+                ),
+                "",
+                (
+                    "請在本機執行以下步驟"
+                    "恢復自動下單："
+                ),
+                (
+                    "  1. cd eslite_monitor "
+                    "&& python generate_session.py"
+                ),
+                (
+                    "  2. 在彈出的瀏覽器中"
+                    "完成登入/驗證"
+                ),
+                (
+                    "  3. gh secret set "
+                    "ESLITE_STORAGE_STATE_B64 \\"
+                ),
+                (
+                    '       --body "$(base64 -i '
+                    "eslite_storage_state.json "
+                    "| tr -d '\\n')\" \\"
+                ),
+                (
+                    "       --repo "
+                    "k0341055/beyblade-funbox-monitor"
+                ),
+                "",
+                (
+                    "本次偵測時間："
+                    f"{datetime.now(self.TW_TZ).strftime('%Y-%m-%d %H:%M:%S')}"
+                    "（台灣時間）"
+                ),
+            ]
+        )
 
         self._send_email(
             self.ORDER_RECIPIENTS,
@@ -1523,11 +1860,9 @@ class EsliteMonitorBase(ABC):
             body,
         )
 
-    def _notify_login_required_once(self):
-        """
-        平行 worker 同時遇到驗證時，
-        整次 run 最多寄一封登入警告。
-        """
+    def _notify_login_required_once(
+        self,
+    ):
 
         should_send = False
 
@@ -1536,25 +1871,16 @@ class EsliteMonitorBase(ABC):
             if not self._login_required_notified:
 
                 self._login_required_notified = True
+
                 should_send = True
 
         if should_send:
+
             self._notify_login_required()
 
-    # ─────────────────────────────────────────
-    # 自動下單流程
-    # ─────────────────────────────────────────
-
-    def _prepare_checkout_session(self):
-        """
-        storage 模式使用。
-
-        平行下單前先用一個獨立 Playwright
-        驗證 / 刷新 storage_state。
-
-        避免 N 個商品 worker 同時發現
-        storage_state 過期後一起登入。
-        """
+    def _prepare_checkout_session(
+        self,
+    ):
 
         if (
             self._get_login_fail_count()
@@ -1562,7 +1888,7 @@ class EsliteMonitorBase(ABC):
         ):
 
             log.warning(
-                f"本次執行已累計 "
+                "本次執行已累計 "
                 f"{self._get_login_fail_count()} "
                 "次登入失敗，"
                 "放棄自動下單"
@@ -1592,6 +1918,7 @@ class EsliteMonitorBase(ABC):
                     )
 
                     if state:
+
                         ctx_kwargs[
                             "storage_state"
                         ] = state
@@ -1622,7 +1949,6 @@ class EsliteMonitorBase(ABC):
 
                         return None
 
-                    # 儲存已驗證 session
                     state = ctx.storage_state()
 
                     self._persist_storage_state(
@@ -1634,6 +1960,7 @@ class EsliteMonitorBase(ABC):
                     return state
 
                 finally:
+
                     br.close()
 
         except Exception as e:
@@ -1652,41 +1979,25 @@ class EsliteMonitorBase(ABC):
         session_state=None,
     ) -> dict:
         """
-        Funbox parallel 架構：
+        一商品 = 一個獨立 thread / Chromium / Context / Page。
 
-        一個商品
-        =
-        一個獨立 thread
-        =
-        一套獨立 Playwright
-        =
-        一個獨立 Chromium
-        =
-        一個獨立 Context/Page
-        =
-        一次獨立結帳。
-
-        fresh_login：
-            每個 worker 建立全新 Context，
-            再使用誠品原本登入流程登入。
-
-        storage：
-            每個 worker 仍建立自己的
-            Browser/Context/Page，
-            但載入同一份 storage_state。
-
-        以下誠品網頁流程完全沿用原本：
-            _clear_cart
-            → _add_to_cart
-            → _checkout
+        購物車策略：
+        1. 先檢查目標 GUID 是否已在購物車
+        2. 已存在 → 直接結帳
+        3. 不存在 → 加入商品 → 結帳
+        4. 不清空購物車
+        5. 結帳失敗時下一輪仍可再次重試
         """
 
-        guid = product["guid"]
+        guid = product[
+            "guid"
+        ]
 
         result = {
             "product": product,
             "guid": guid,
             "added": False,
+            "reused_cart": False,
             "order_id": None,
             "status": "failed",
         }
@@ -1695,11 +2006,13 @@ class EsliteMonitorBase(ABC):
             br,
             storage=None,
         ):
+
             kwargs = {
                 "user_agent": self._UA,
             }
 
             if storage:
+
                 kwargs[
                     "storage_state"
                 ] = storage
@@ -1730,19 +2043,18 @@ class EsliteMonitorBase(ABC):
                 ctx = None
 
                 try:
-                    # ─────────────────────────
-                    # fresh_login
-                    # ─────────────────────────
                     if (
                         self.PARALLEL_SESSION_MODE
                         == "fresh_login"
                     ):
 
-                        # 真正 Funbox-style：
-                        # 這個商品 thread 自己登入
-                        ctx = _new_ctx(br)
+                        ctx = _new_ctx(
+                            br
+                        )
 
-                        page = ctx.new_page()
+                        page = (
+                            ctx.new_page()
+                        )
 
                         log.info(
                             f"[{guid}] "
@@ -1756,9 +2068,6 @@ class EsliteMonitorBase(ABC):
                             ctx,
                         ):
 
-                            # 若 fresh login 因 OTP 失敗，
-                            # 有 generate_session state 時
-                            # fallback 到 storage。
                             if session_state:
 
                                 log.warning(
@@ -1770,6 +2079,7 @@ class EsliteMonitorBase(ABC):
 
                                 try:
                                     ctx.close()
+
                                 except Exception:
                                     pass
 
@@ -1778,7 +2088,9 @@ class EsliteMonitorBase(ABC):
                                     session_state,
                                 )
 
-                                page = ctx.new_page()
+                                page = (
+                                    ctx.new_page()
+                                )
 
                                 if not self._is_logged_in(
                                     page
@@ -1817,9 +2129,6 @@ class EsliteMonitorBase(ABC):
 
                                 return result
 
-                    # ─────────────────────────
-                    # storage mode
-                    # ─────────────────────────
                     else:
 
                         if not session_state:
@@ -1841,7 +2150,9 @@ class EsliteMonitorBase(ABC):
                             session_state,
                         )
 
-                        page = ctx.new_page()
+                        page = (
+                            ctx.new_page()
+                        )
 
                         log.info(
                             f"[{guid}] "
@@ -1867,64 +2178,81 @@ class EsliteMonitorBase(ABC):
 
                             return result
 
-                    # ═════════════════════════
-                    # 以下完全沿用誠品原本流程
-                    # ═════════════════════════
-
-                    # 每個 worker 自己清購物車
-                    self._clear_cart(
-                        page
-                    )
-
-                    qty = (
-                        self._calc_order_qty(
-                            product
+                    cart_has_target = (
+                        self._cart_contains_product(
+                            page,
+                            guid,
                         )
                     )
 
-                    # 只加入這一個商品
-                    if not self._add_to_cart(
-                        page,
-                        guid,
-                        qty,
-                    ):
+                    if cart_has_target:
 
-                        log.warning(
-                            f"[{guid}] "
-                            "加入購物車失敗："
-                            f"{product['name']}"
-                        )
+                        result[
+                            "reused_cart"
+                        ] = True
 
                         result[
                             "status"
-                        ] = "add_failed"
+                        ] = "cart_reused"
 
-                        return result
+                        log.info(
+                            f"[{guid}] "
+                            "購物車已有目標商品，"
+                            "直接開始結帳..."
+                        )
 
-                    result[
-                        "added"
-                    ] = True
+                        order_id = self._checkout(
+                            page,
+                            cart_already_open=True,
+                        )
 
-                    result[
-                        "status"
-                    ] = "cart_added"
+                    else:
 
-                    # 沿用原設計：
-                    # 加入購物車後立即發通知
-                    self._notify_cart_added(
-                        [product]
-                    )
+                        qty = (
+                            self._calc_order_qty(
+                                product
+                            )
+                        )
 
-                    log.info(
-                        f"[{guid}] "
-                        "已加入購物車，"
-                        "開始獨立自動結帳..."
-                    )
+                        if not self._add_to_cart(
+                            page,
+                            guid,
+                            qty,
+                        ):
 
-                    # 每個 worker 獨立結帳
-                    order_id = self._checkout(
-                        page
-                    )
+                            log.warning(
+                                f"[{guid}] "
+                                "加入購物車失敗："
+                                f"{product['name']}"
+                            )
+
+                            result[
+                                "status"
+                            ] = "add_failed"
+
+                            return result
+
+                        result[
+                            "added"
+                        ] = True
+
+                        result[
+                            "status"
+                        ] = "cart_added"
+
+                        self._notify_cart_added(
+                            [product]
+                        )
+
+                        log.info(
+                            f"[{guid}] "
+                            "已加入購物車，"
+                            "開始獨立自動結帳..."
+                        )
+
+                        order_id = self._checkout(
+                            page
+                        )
 
                     if order_id:
 
@@ -1951,7 +2279,8 @@ class EsliteMonitorBase(ABC):
                         log.warning(
                             f"[{guid}] "
                             "自動結帳失敗；"
-                            "此 worker 已成功加車。"
+                            "下一輪仍可再次檢查"
+                            "購物車並重試。"
                         )
 
                     return result
@@ -1962,6 +2291,7 @@ class EsliteMonitorBase(ABC):
 
                         try:
                             ctx.close()
+
                         except Exception:
                             pass
 
@@ -1986,27 +2316,6 @@ class EsliteMonitorBase(ABC):
         self,
         in_stock_products: list,
     ):
-        """
-        單帳號 × 多商品平行下單。
-
-        CHECKOUT_MAX：
-            本輪最多挑幾件商品。
-
-        PARALLEL_CHECKOUT_LIMIT：
-            同時最多跑幾個商品 checkout worker。
-
-        每個商品 worker 都會：
-
-        自己建立
-        sync_playwright
-        → Chromium
-        → Context
-        → Page
-        → 登入
-        → 清購物車
-        → 加單一商品
-        → 獨立結帳
-        """
 
         if (
             self._get_login_fail_count()
@@ -2014,7 +2323,7 @@ class EsliteMonitorBase(ABC):
         ):
 
             log.warning(
-                f"本次執行已累計 "
+                "本次執行已累計 "
                 f"{self._get_login_fail_count()} "
                 "次登入失敗，"
                 "放棄自動下單"
@@ -2027,54 +2336,69 @@ class EsliteMonitorBase(ABC):
             self._load_order_state()
         )
 
-        # 過濾：
-        # 1. 已下單
-        # 2. 本次 run 已加過購物車
-        # 3. ESLITE_PURCHASED_NAMES
-        to_order = [
+        whitelist_products = [
             p
             for p in in_stock_products
-            if p["guid"] not in ordered
-            and p["guid"]
-            not in self._cart_added_guids
-            and not self._is_purchased(p)
+            if self._is_buy_whitelisted(
+                p
+            )
+        ]
+
+        blocked_by_whitelist = (
+            len(in_stock_products)
+            - len(whitelist_products)
+        )
+
+        if blocked_by_whitelist:
+
+            log.info(
+                "BUY_KEYWORDS 白名單外商品"
+                "（僅通知，不下單）："
+                f"{blocked_by_whitelist} 件"
+            )
+
+        to_order = [
+            p
+            for p in whitelist_products
+            if (
+                p["guid"]
+                not in ordered
+            )
+            and (
+                not self._is_purchased(
+                    p
+                )
+            )
         ][
-            : self.CHECKOUT_MAX
+            :self.CHECKOUT_MAX
         ]
 
         if not to_order:
 
             log.info(
-                "所有有庫存商品均已下單"
-                "或已購買（限購一次），"
+                "所有白名單有庫存商品"
+                "均已成功下單或已列為已購買，"
                 "跳過自動下單"
             )
 
             return {}
 
         log.info(
-            f"平行下單準備："
+            "平行下單準備："
             f"{len(to_order)} 件商品"
-            f" | CHECKOUT_MAX="
+            " | CHECKOUT_MAX="
             f"{self.CHECKOUT_MAX}"
-            f" | PARALLEL_CHECKOUT_LIMIT="
+            " | PARALLEL_CHECKOUT_LIMIT="
             f"{self.PARALLEL_CHECKOUT_LIMIT}"
-            f" | SESSION_MODE="
+            " | SESSION_MODE="
             f"{self.PARALLEL_SESSION_MODE}"
         )
-
-        # ─────────────────────────────────────
-        # Session 準備
-        # ─────────────────────────────────────
 
         if (
             self.PARALLEL_SESSION_MODE
             == "storage"
         ):
 
-            # storage 模式：
-            # 先只驗證一次，
-            # 再把 snapshot 給每個 worker。
             session_state = (
                 self._prepare_checkout_session()
             )
@@ -2084,11 +2408,6 @@ class EsliteMonitorBase(ABC):
 
         else:
 
-            # fresh_login：
-            # 每個 worker 自己登入。
-            #
-            # 這裡仍載入既有 state，
-            # 只作為 OTP fallback。
             session_state = (
                 self._load_storage_state_data()
             )
@@ -2102,10 +2421,6 @@ class EsliteMonitorBase(ABC):
         )
 
         results = {}
-
-        # ═════════════════════════════════════
-        # 真正「單帳號 × 多商品」平行
-        # ═════════════════════════════════════
 
         with ThreadPoolExecutor(
             max_workers=max_workers
@@ -2124,11 +2439,16 @@ class EsliteMonitorBase(ABC):
                 futures
             ):
 
-                p = futures[future]
+                p = futures[
+                    future
+                ]
 
-                guid = p["guid"]
+                guid = p[
+                    "guid"
+                ]
 
                 try:
+
                     result = (
                         future.result()
                     )
@@ -2146,6 +2466,7 @@ class EsliteMonitorBase(ABC):
                         "product": p,
                         "guid": guid,
                         "added": False,
+                        "reused_cart": False,
                         "order_id": None,
                         "status": "exception",
                     }
@@ -2154,23 +2475,12 @@ class EsliteMonitorBase(ABC):
                     guid
                 ] = result
 
-                # 成功加入購物車後，
-                # 本次 run 就不再重跑該商品
-                if result.get(
-                    "added"
-                ):
-
-                    self._cart_added_guids.add(
-                        guid
+                order_id = (
+                    result.get(
+                        "order_id"
                     )
-
-                order_id = result.get(
-                    "order_id"
                 )
 
-                # ─────────────────────────────
-                # 成功訂單
-                # ─────────────────────────────
                 if order_id:
 
                     now_str = (
@@ -2186,11 +2496,6 @@ class EsliteMonitorBase(ABC):
                         "ordered_at": now_str,
                     }
 
-                    # 每完成一張就立即寫檔。
-                    #
-                    # 如果 A 已成功、
-                    # B/C 還在跑時 job 掛掉，
-                    # A 仍然已經被記錄。
                     self._save_order_state(
                         ordered
                     )
@@ -2200,36 +2505,41 @@ class EsliteMonitorBase(ABC):
                         order_id,
                     )
 
-                elif result.get(
-                    "added"
+                elif (
+                    result.get(
+                        "added"
+                    )
+                    or result.get(
+                        "reused_cart"
+                    )
                 ):
 
                     log.warning(
                         f"[{guid}] "
-                        "商品已加入該 worker "
-                        "購物車但未成功建立訂單，"
-                        "本次 run 不再重複嘗試。"
+                        "購物車流程已完成但"
+                        "未成功建立訂單；"
+                        "不寫入 ORDER_STATE_FILE，"
+                        "下一輪仍可再次檢查"
+                        "購物車並重試結帳。"
                     )
 
         success_count = sum(
             1
             for r in results.values()
-            if r.get("order_id")
+            if r.get(
+                "order_id"
+            )
         )
 
         log.info(
-            f"平行下單完成："
+            "平行下單完成："
             f"成功 {success_count}/"
             f"{len(to_order)} 件，"
-            f"失敗/未完成 "
+            "失敗/未完成 "
             f"{len(to_order) - success_count} 件"
         )
 
         return results
-
-    # ─────────────────────────────────────────
-    # 核心偵測（每輪）
-    # ─────────────────────────────────────────
 
     def check_once(
         self,
@@ -2243,7 +2553,36 @@ class EsliteMonitorBase(ABC):
                 )
             )
 
+            now = datetime.now(
+                self.TW_TZ
+            )
+
+            cutoff = (
+                now
+                - self.NOTIFY_COOLDOWN
+            )
+
+            notified = (
+                self._load_notify_state()
+            )
+
+            current_guids = {
+                p["guid"]
+                for p in products
+            }
+
+            notified = {
+                guid: ts
+                for guid, ts
+                in notified.items()
+                if guid in current_guids
+            }
+
             if not products:
+
+                self._save_notify_state(
+                    notified
+                )
 
                 log.info(
                     "目前無庫存商品，"
@@ -2252,6 +2591,47 @@ class EsliteMonitorBase(ABC):
 
                 return True
 
+            to_notify = []
+
+            for p in products:
+
+                guid = p[
+                    "guid"
+                ]
+
+                last_ts = (
+                    notified.get(
+                        guid
+                    )
+                )
+
+                if not last_ts:
+
+                    to_notify.append(
+                        p
+                    )
+
+                    continue
+
+                try:
+
+                    if (
+                        self._parse_notify_ts(
+                            last_ts
+                        )
+                        < cutoff
+                    ):
+
+                        to_notify.append(
+                            p
+                        )
+
+                except Exception:
+
+                    to_notify.append(
+                        p
+                    )
+
             checkout_products = []
 
             if (
@@ -2259,21 +2639,42 @@ class EsliteMonitorBase(ABC):
                 and self.ESLITE_ACCOUNT
             ):
 
-                # SKIP_KEYWORDS：
-                # 發通知，但不自動下單。
-                checkout_products = [
+                whitelisted_products = [
                     p
                     for p in products
+                    if self._is_buy_whitelisted(
+                        p
+                    )
+                ]
+
+                blocked_by_whitelist = (
+                    len(products)
+                    - len(
+                        whitelisted_products
+                    )
+                )
+
+                if blocked_by_whitelist:
+
+                    log.info(
+                        "BUY_KEYWORDS 白名單外商品"
+                        "（僅通知，不下單）："
+                        f"{blocked_by_whitelist} 件"
+                    )
+
+                checkout_products = [
+                    p
+                    for p
+                    in whitelisted_products
                     if not any(
                         kw.upper()
                         in p["name"].upper()
-                        for kw
-                        in SKIP_KEYWORDS
+                        for kw in SKIP_KEYWORDS
                     )
                 ]
 
                 skipped = (
-                    len(products)
+                    len(whitelisted_products)
                     - len(checkout_products)
                 )
 
@@ -2281,20 +2682,44 @@ class EsliteMonitorBase(ABC):
 
                     log.info(
                         "SKIP_KEYWORDS 商品"
-                        "（僅通知，不下單）："
+                        "（已在白名單，"
+                        "但仍僅通知不下單）："
                         f"{skipped} 件"
                     )
 
-            # ═════════════════════════════════
-            # 比照 Funbox：
-            # 下單先啟動，
-            # Email 同時寄，
-            # 不讓 SMTP 阻塞搶貨。
-            #
-            # 注意：
-            # 這個 thread 完全沒有接收
-            # 主 monitor 的 Playwright Page。
-            # ═════════════════════════════════
+            def _send_due_notifications():
+
+                if not to_notify:
+
+                    log.info(
+                        f"所有 {len(products)} "
+                        "件有庫存商品均在 "
+                        "1 小時通知冷卻期內"
+                    )
+
+                    return
+
+                log.info(
+                    "發送庫存通知："
+                    f"{len(to_notify)} 件"
+                    f"（共 {len(products)} 件，"
+                    "冷卻中 "
+                    f"{len(products) - len(to_notify)} 件）"
+                )
+
+                self._notify_products(
+                    to_notify
+                )
+
+                notified_at = (
+                    now.isoformat()
+                )
+
+                for p in to_notify:
+
+                    notified[
+                        p["guid"]
+                    ] = notified_at
 
             if checkout_products:
 
@@ -2309,35 +2734,31 @@ class EsliteMonitorBase(ABC):
                         )
                     )
 
-                    log.info(
-                        "發送庫存通知："
-                        f"{len(products)} 件"
-                    )
+                    _send_due_notifications()
 
-                    self._notify_products(
-                        products
+                    self._save_notify_state(
+                        notified
                     )
 
                     try:
+
                         buy_future.result()
 
                     except Exception as e:
 
                         log.error(
-                            "平行自動下單主流程例外："
+                            "平行自動下單"
+                            "主流程例外："
                             f"{e}",
                             exc_info=True,
                         )
 
             else:
 
-                log.info(
-                    "發送庫存通知："
-                    f"{len(products)} 件"
-                )
+                _send_due_notifications()
 
-                self._notify_products(
-                    products
+                self._save_notify_state(
+                    notified
                 )
 
             return True
@@ -2353,16 +2774,15 @@ class EsliteMonitorBase(ABC):
                 page.goto(
                     "about:blank"
                 )
+
             except Exception:
                 pass
 
             return False
 
-    # ─────────────────────────────────────────
-    # 主迴圈
-    # ─────────────────────────────────────────
-
-    def run(self):
+    def run(
+        self,
+    ):
 
         log.info(
             f"{self.__class__.__name__}"
@@ -2373,6 +2793,8 @@ class EsliteMonitorBase(ABC):
             f"{self.PARALLEL_CHECKOUT_LIMIT}"
             " | Session 模式："
             f"{self.PARALLEL_SESSION_MODE}"
+            " | 通知冷卻："
+            f"{self.NOTIFY_COOLDOWN.total_seconds() / 3600:g} 小時"
         )
 
         with sync_playwright() as pw:
@@ -2385,11 +2807,6 @@ class EsliteMonitorBase(ABC):
                 ],
             )
 
-            # 監控 context 永遠匿名，
-            # 不載入會員 session。
-            #
-            # 自動下單 thread 不會碰這個
-            # br / ctx / page。
             ctx = br.new_context(
                 user_agent=self._UA
             )
@@ -2400,7 +2817,9 @@ class EsliteMonitorBase(ABC):
                 "{get: () => undefined})"
             )
 
-            page = ctx.new_page()
+            page = (
+                ctx.new_page()
+            )
 
             for round_num in range(
                 1,
@@ -2444,39 +2863,36 @@ class EsliteMonitorBase(ABC):
         )
 
 
-# ─────────────────────────────────────────────
-# 展覽監控（書展 API）
-# ─────────────────────────────────────────────
-
-
 class ExhibitionMonitor(
     EsliteMonitorBase
 ):
-    """
-    監控誠品書展 API（book_exhibits）。
-    """
 
-    def __init__(self):
+    def __init__(
+        self,
+    ):
 
         super().__init__()
 
-        self.API_URL = os.environ.get(
-            "ESLITE_API_URL",
-            "",
-        ).strip()
+        self.API_URL = (
+            os.environ.get(
+                "ESLITE_API_URL",
+                "",
+            ).strip()
+        )
 
         if not self.API_URL:
 
             raise ValueError(
                 "ESLITE_API_URL 環境變數未設定"
-                "（請設定 GitHub Variable "
-                "ESLITE_API_URL）"
+                "（請設定 GitHub Variable ESLITE_API_URL）"
             )
 
-        _kw_env = os.environ.get(
-            "MONITOR_KEYWORDS",
-            "",
-        ).strip()
+        _kw_env = (
+            os.environ.get(
+                "MONITOR_KEYWORDS",
+                "",
+            ).strip()
+        )
 
         self.MONITOR_KEYWORDS: list = [
             k.strip().upper()
@@ -2507,15 +2923,14 @@ class ExhibitionMonitor(
                 "name"
             )
 
-            if (
-                not guid
-                or not name
-            ):
+            if not guid or not name:
                 return
 
             try:
                 stock = int(
-                    p.get("stock")
+                    p.get(
+                        "stock"
+                    )
                 )
 
             except (
@@ -2536,27 +2951,25 @@ class ExhibitionMonitor(
                     or "unknown"
                 ),
                 "stock": stock,
-                "account_qty_limit": (
-                    p.get(
-                        "account_qty_limit"
-                    )
+                "account_qty_limit": p.get(
+                    "account_qty_limit"
                 ),
-                "order_qty_limit": (
-                    p.get(
-                        "order_qty_limit"
-                    )
+                "order_qty_limit": p.get(
+                    "order_qty_limit"
                 ),
                 "image": p.get(
                     "image",
                     "",
                 ),
                 "url": (
-                    f"{self.ESLITE_BASE}/"
-                    f"product/{guid}"
+                    f"{self.ESLITE_BASE}"
+                    f"/product/{guid}"
                 ),
             }
 
-        def walk(value):
+        def walk(
+            value,
+        ):
 
             if isinstance(
                 value,
@@ -2564,7 +2977,10 @@ class ExhibitionMonitor(
             ):
 
                 for item in value:
-                    walk(item)
+
+                    walk(
+                        item
+                    )
 
             elif isinstance(
                 value,
@@ -2579,12 +2995,20 @@ class ExhibitionMonitor(
                         "name"
                     )
                 ):
-                    add(value)
+
+                    add(
+                        value
+                    )
 
                 for child in value.values():
-                    walk(child)
 
-        walk(data)
+                    walk(
+                        child
+                    )
+
+        walk(
+            data
+        )
 
         return products
 
@@ -2599,7 +3023,9 @@ class ExhibitionMonitor(
             timeout=30000,
         )
 
-        page.wait_for_timeout(1500)
+        page.wait_for_timeout(
+            1500
+        )
 
         try:
             raw = page.inner_text(
@@ -2607,13 +3033,16 @@ class ExhibitionMonitor(
             )
 
         except Exception:
+
             raw = page.inner_text(
                 "body"
             )
 
         all_products = (
             self._extract_products(
-                json.loads(raw)
+                json.loads(
+                    raw
+                )
             )
         )
 
@@ -2624,7 +3053,8 @@ class ExhibitionMonitor(
                 for guid, p
                 in all_products.items()
                 if any(
-                    kw in p["name"].upper()
+                    kw
+                    in p["name"].upper()
                     for kw
                     in self.MONITOR_KEYWORDS
                 )
@@ -2634,8 +3064,13 @@ class ExhibitionMonitor(
 
         for guid, p in all_products.items():
 
-            name = p["name"]
-            stock = p["stock"]
+            name = p[
+                "name"
+            ]
+
+            stock = p[
+                "stock"
+            ]
 
             if (
                 not stock
@@ -2644,7 +3079,7 @@ class ExhibitionMonitor(
                 continue
 
             lim = (
-                f"帳號上限:"
+                "帳號上限:"
                 f"{p['account_qty_limit']}件"
                 if p.get(
                     "account_qty_limit"
@@ -2660,17 +3095,22 @@ class ExhibitionMonitor(
                 f" | {p['status']}"
             )
 
-            result.append({
-                "guid": guid,
-                **p,
-            })
+            result.append(
+                {
+                    "guid": guid,
+                    **p,
+                }
+            )
 
-        if len(all_products) == 0:
+        if len(
+            all_products
+        ) == 0:
 
             if self.MONITOR_KEYWORDS:
 
                 log.warning(
-                    "展覽 API 未找到含關鍵字 "
+                    "展覽 API 未找到"
+                    "含關鍵字 "
                     f"{self.MONITOR_KEYWORDS} "
                     "的商品，繼續監控"
                 )
@@ -2693,10 +3133,11 @@ class ExhibitionMonitor(
             )
 
             log.info(
-                f"展覽 API 抽取 "
+                "展覽 API 抽取 "
                 f"{len(all_products)} 件"
                 f"{kw_note}，"
-                f"有庫存 {len(result)} 件"
+                "有庫存 "
+                f"{len(result)} 件"
             )
 
         return result
@@ -2711,18 +3152,9 @@ class ExhibitionMonitor(
         )
 
 
-# ─────────────────────────────────────────────
-# 個別商品監控
-# ─────────────────────────────────────────────
-
-
 class ProductMonitor(
     EsliteMonitorBase
 ):
-    """
-    監控 ESLITE_EXTRA_PRODUCTS
-    列出的個別商品。
-    """
 
     def fetch_in_stock_products(
         self,
@@ -2732,8 +3164,7 @@ class ProductMonitor(
         if not self.EXTRA_PRODUCT_GUIDS:
 
             log.warning(
-                "ESLITE_EXTRA_PRODUCTS "
-                "未設定，"
+                "ESLITE_EXTRA_PRODUCTS 未設定，"
                 "ProductMonitor 無商品可追蹤"
             )
 
@@ -2751,22 +3182,19 @@ class ProductMonitor(
             )
 
             if product:
+
                 result.append(
                     product
                 )
 
         log.info(
-            f"個別追蹤 "
+            "個別追蹤 "
             f"{len(self.EXTRA_PRODUCT_GUIDS)} 件，"
-            f"有庫存 {len(result)} 件"
+            "有庫存 "
+            f"{len(result)} 件"
         )
 
         return result
-
-
-# ─────────────────────────────────────────────
-# 關鍵字搜尋監控
-# ─────────────────────────────────────────────
 
 
 def _parse_holmes_response(
@@ -2808,22 +3236,28 @@ def _parse_holmes_response(
             ):
 
                 items = val
+
                 break
 
     if items is None:
 
         keys = (
-            list(data.keys())
+            list(
+                data.keys()
+            )
             if isinstance(
                 data,
                 dict,
             )
-            else type(data)
+            else type(
+                data
+            )
         )
 
         log.warning(
             "Holmes API 回傳未知格式，"
-            f"無法解析，keys: {keys}"
+            "無法解析，keys: "
+            f"{keys}"
         )
 
         return []
@@ -2854,25 +3288,28 @@ def _parse_holmes_response(
             or ""
         ).strip()
 
-        name = item.get(
-            "name",
-            "",
-        ).strip()
+        name = (
+            item.get(
+                "name",
+                "",
+            ).strip()
+        )
 
-        if (
-            not guid
-            or not name
-        ):
+        if not guid or not name:
             continue
 
-        availability = item.get(
-            "availability",
-            "",
+        availability = (
+            item.get(
+                "availability",
+                "",
+            )
         )
 
         try:
             stock = int(
-                item.get("stock")
+                item.get(
+                    "stock"
+                )
                 or 0
             )
 
@@ -2880,6 +3317,7 @@ def _parse_holmes_response(
             TypeError,
             ValueError,
         ):
+
             stock = 0
 
         if (
@@ -2887,6 +3325,7 @@ def _parse_holmes_response(
             and availability
             == "IN_STOCK"
         ):
+
             stock = 1
 
         btn_status = (
@@ -2930,28 +3369,26 @@ def _parse_holmes_response(
         log.info(
             "有庫存（搜尋）→ "
             f"{name}（{guid}）"
-            f" | availability:"
+            " | availability:"
             f"{availability}"
             f" | {lim}"
             f" | {btn_status}"
         )
 
-        result.append({
-            "guid": guid,
-            "name": name,
-            "stock": stock,
-            "status": btn_status,
-            "account_qty_limit": (
-                acct_lim
-            ),
-            "order_qty_limit": (
-                ord_lim
-            ),
-            "url": (
-                f"{eslite_base}/product/"
-                f"{guid}"
-            ),
-        })
+        result.append(
+            {
+                "guid": guid,
+                "name": name,
+                "stock": stock,
+                "status": btn_status,
+                "account_qty_limit": acct_lim,
+                "order_qty_limit": ord_lim,
+                "url": (
+                    f"{eslite_base}"
+                    f"/product/{guid}"
+                ),
+            }
+        )
 
     return result
 
@@ -2959,27 +3396,25 @@ def _parse_holmes_response(
 class KeywordSearchMonitor(
     EsliteMonitorBase
 ):
-    """
-    透過 Holmes 搜尋 API
-    監控關鍵字商品。
-    """
 
-    def __init__(self):
+    def __init__(
+        self,
+    ):
 
         super().__init__()
 
-        self.SEARCH_URL = os.environ.get(
-            "ESLITE_SEARCH_URL",
-            "",
-        ).strip()
+        self.SEARCH_URL = (
+            os.environ.get(
+                "ESLITE_SEARCH_URL",
+                "",
+            ).strip()
+        )
 
         if not self.SEARCH_URL:
 
             raise ValueError(
-                "ESLITE_SEARCH_URL "
-                "環境變數未設定"
-                "（請設定 GitHub Variable "
-                "ESLITE_SEARCH_URL）"
+                "ESLITE_SEARCH_URL 環境變數未設定"
+                "（請設定 GitHub Variable ESLITE_SEARCH_URL）"
             )
 
     def _fetch_keyword_search(
@@ -2993,7 +3428,9 @@ class KeywordSearchMonitor(
             timeout=30000,
         )
 
-        page.wait_for_timeout(1500)
+        page.wait_for_timeout(
+            1500
+        )
 
         try:
             raw = page.inner_text(
@@ -3001,6 +3438,7 @@ class KeywordSearchMonitor(
             )
 
         except Exception:
+
             raw = page.inner_text(
                 "body"
             )
@@ -3023,46 +3461,38 @@ class KeywordSearchMonitor(
 
         log.info(
             "關鍵字搜尋，"
-            f"有庫存 {len(products)} 件"
+            "有庫存 "
+            f"{len(products)} 件"
         )
 
         return products
 
 
-# ─────────────────────────────────────────────
-# 合併監控
-# ─────────────────────────────────────────────
-
-
 class CombinedMonitor(
     ExhibitionMonitor
 ):
-    """
-    展覽 API + Holmes 關鍵字搜尋。
 
-    關鍵：
-    不再將主 thread 建立的 browser
-    傳入 ThreadPoolExecutor。
-
-    兩個 monitor worker
-    都會自己建立完整 Playwright。
-    """
-
-    def __init__(self):
+    def __init__(
+        self,
+    ):
 
         EsliteMonitorBase.__init__(
             self
         )
 
-        self.API_URL = os.environ.get(
-            "ESLITE_API_URL",
-            "",
-        ).strip()
+        self.API_URL = (
+            os.environ.get(
+                "ESLITE_API_URL",
+                "",
+            ).strip()
+        )
 
-        _kw_env = os.environ.get(
-            "MONITOR_KEYWORDS",
-            "",
-        ).strip()
+        _kw_env = (
+            os.environ.get(
+                "MONITOR_KEYWORDS",
+                "",
+            ).strip()
+        )
 
         self.MONITOR_KEYWORDS = [
             k.strip().upper()
@@ -3070,16 +3500,17 @@ class CombinedMonitor(
             if k.strip()
         ]
 
-        self.SEARCH_URL = os.environ.get(
-            "ESLITE_SEARCH_URL",
-            "",
-        ).strip()
+        self.SEARCH_URL = (
+            os.environ.get(
+                "ESLITE_SEARCH_URL",
+                "",
+            ).strip()
+        )
 
         if not self.SEARCH_URL:
 
             raise ValueError(
-                "ESLITE_SEARCH_URL "
-                "環境變數未設定"
+                "ESLITE_SEARCH_URL 環境變數未設定"
                 "（combined 模式需要此變數）"
             )
 
@@ -3094,7 +3525,9 @@ class CombinedMonitor(
             timeout=30000,
         )
 
-        page.wait_for_timeout(1500)
+        page.wait_for_timeout(
+            1500
+        )
 
         try:
             raw = page.inner_text(
@@ -3102,6 +3535,7 @@ class CombinedMonitor(
             )
 
         except Exception:
+
             raw = page.inner_text(
                 "body"
             )
@@ -3115,28 +3549,6 @@ class CombinedMonitor(
         self,
         page,
     ) -> list:
-        """
-        展覽 API + Holmes 搜尋平行執行。
-
-        舊版：
-            Main Thread 建 browser
-            → ThreadPool worker
-            → browser.new_context()
-            → greenlet.error
-
-        新版：
-            Thread A
-            → sync_playwright()
-            → Chromium A
-            → Context A
-            → Page A
-
-            Thread B
-            → sync_playwright()
-            → Chromium B
-            → Context B
-            → Page B
-        """
 
         def _run_exhibition():
 
@@ -3239,11 +3651,6 @@ class CombinedMonitor(
 
                 return []
 
-        # 兩個 thread。
-        #
-        # 注意：
-        # future 裡完全沒有使用
-        # page.context.browser。
         with ThreadPoolExecutor(
             max_workers=2
         ) as executor:
@@ -3267,10 +3674,6 @@ class CombinedMonitor(
             search_results = (
                 future_search.result()
             )
-
-        # ─────────────────────────────────────
-        # 合併 + GUID 去重
-        # ─────────────────────────────────────
 
         products: dict = {}
 
@@ -3326,17 +3729,14 @@ class CombinedMonitor(
         )
 
 
-# ─────────────────────────────────────────────
-# 入口
-# ─────────────────────────────────────────────
-
-
 if __name__ == "__main__":
 
-    mode = os.environ.get(
-        "MONITOR_MODE",
-        "exhibition",
-    ).lower()
+    mode = (
+        os.environ.get(
+            "MONITOR_MODE",
+            "exhibition",
+        ).lower()
+    )
 
     if mode == "product":
 
