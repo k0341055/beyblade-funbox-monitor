@@ -112,7 +112,7 @@ SKIP_KEYWORDS: list[str] = [
 # 商品名稱含以下任一關鍵字 → 才執行自動下單
 BUY_KEYWORDS: list[str] = [
     "BX-09",
-    "UX-17", "UX-21", "UX-15", "UX-04",
+    "UX-17", "UX-21", "UX-15", "UX-04","BX-00 蒼龍神劍"
     "BX-46",
     "CX-16", "CX-04",
     "UX-03", "UX-16",
