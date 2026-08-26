@@ -382,19 +382,20 @@ python 1999_monitor/refresh_session.py
 
 ```
 EsliteMonitorBase (ABC)
-  ├─ 共用：登入、購物車、結帳、Email 通知、session 持久化、下單去重
+  ├─ 共用：登入、購物車、結帳、Email 通知、session 持久化、下單去重、通知冷卻
   │
   ├─ ExhibitionMonitor（MONITOR_MODE=exhibition）
   │     └─ 呼叫 book_exhibits API → 遞迴解析書展 JSON → ~6 秒/輪 → 50 輪/次
   │
   ├─ KeywordSearchMonitor（MONITOR_MODE=keyword）
-  │     └─ 呼叫 Holmes 搜尋 API → 解析 id/availability/button_status → ~6 秒/輪
+  │     └─ 呼叫 Holmes 搜尋 API → _is_holmes_beyblade_target 過濾
+  │           → 只保留純 Beyblade X 陀螺／戰鬥盤，自動排除書籍／雜誌／配件
   │
   ├─ CombinedMonitor（MONITOR_MODE=combined，eslite_monitor.yml 預設）
   │     ├─ 繼承自 ExhibitionMonitor（共用 _fetch_exhibition）
   │     └─ ThreadPoolExecutor(max_workers=2) 平行執行
   │           ├─ _fetch_exhibition()（書展 API，ESLITE_API_URL 未設定則跳過）
-  │           └─ _fetch_keyword_search()（Holmes API）
+  │           └─ _fetch_keyword_search()（Holmes API，經 _is_holmes_beyblade_target 過濾）
   │           → 結果以 guid 去重合併，書展 API 資料優先
   │
   └─ ProductMonitor（MONITOR_MODE=product）
@@ -445,9 +446,11 @@ Holmes API 欄位格式（與書展 API 不同，解析時分別處理）：
 
 Holmes API 不回傳庫存數量，`availability == "IN_STOCK"` 時內部設 `stock = 1`，下單數量由 `account_qty_limit` / `order_qty_limit` 決定。
 
+Holmes 搜尋結果經 `_is_holmes_beyblade_target()` 三層過濾，只保留純 Beyblade X 陀螺與戰鬥盤，自動排除書籍、漫畫、雜誌、發射器、收納配件等（詳見下方 BUY_KEYWORDS 章節）。
+
 **KeywordSearchMonitor（MONITOR_MODE=keyword）**
 
-單獨執行 Holmes 搜尋 API，不含書展 API，適用於書展已下架但關鍵字仍有商品的情境。
+單獨執行 Holmes 搜尋 API，不含書展 API，適用於書展已下架但關鍵字仍有商品的情境。結果同樣經 `_is_holmes_beyblade_target()` 過濾。
 
 **ProductMonitor（個別商品）**
 
@@ -455,9 +458,9 @@ Holmes API 不回傳庫存數量，`availability == "IN_STOCK"` 時內部設 `st
 
 部分陳列商品（如 UX-14）雖出現在書展 API 中，但 `stock = 0`，會被庫存過濾自然排除，無需另設關鍵字黑名單。
 
-### 通知邏輯（無冷卻）
+### 通知邏輯（1 小時冷卻）
 
-**每輪只要偵測到有庫存，就立即發送通知**，沒有 1 小時冷卻限制。通知信件附有一鍵結帳連結（`eslite.com/cart/step2`）。
+偵測到有庫存商品時，**相同商品 1 小時內只通知一次**（冷卻時間由 `NOTIFY_COOLDOWN_HOURS` 控制，預設 1 小時）。冷卻狀態儲存於 `eslite_notify_state.json`，跨輪次持久化。通知信件附有一鍵結帳連結（`eslite.com/cart/step2`）。
 
 ### 效能優化
 
@@ -475,72 +478,100 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
 ```
 偵測到有庫存商品
   │
-  ├─ SKIP_KEYWORDS 符合 → 通知，跳過自動下單（見下方 SKIP_KEYWORDS 表）
+  ├─ 上架通知立即發出（1 小時冷卻）→ 全體 GMAIL_RECIPIENTS
+  │     PURCHASED_NAMES 符合的商品 → 發獨立通知給 ORDER_RECIPIENTS（不自動下單）
   │
-  ├─ 本次 run 內登入失敗已達 2 次 → 直接返回（僅繼續通知，不再嘗試登入）
-  │     （run 結束後 VM 銷毀，下次 run 計數歸零）
-  │
-  ├─ 過濾：移除 eslite_order_state.json 中已下單的商品
-  │         誠品每帳號每商品限購一次（不論哪次上架）
-  ├─ 取前 CHECKOUT_MAX 件（預設 3，防止大型展覽大量下單）
-  │
-  ├─ 若所有商品均已下單 → 直接返回，不建立 session context，不登入
-  │     （此後每輪仍繼續通知，但完全沒有登入行為，不影響使用者的 session）
-  │
-  ├─ 建立獨立結帳 context（載入 storage_state session cookies）
-  │     與監控 context 完全隔離，避免從 GitHub runner（美國 IP）持續送認證請求
-  │     導致帳號被誠品判定為異地登入並強制所有裝置登出
-  │
-  ├─ ensure_logged_in()
-  │     ├─ 帶 storage_state cookies → 導覽 /member → 確認登出按鈕存在
-  │     └─ 若未登入 → _do_login()（填帳密 → 等待 reCAPTCHA → 存 session）
-  │           ├─ 登入成功 → 繼續下單
-  │           └─ 登入失敗（簡訊驗證 / 帳密錯誤 / 例外）
-  │                 ├─ 失敗計數 +1
-  │                 ├─ 發送登入失敗警告 Email（說明手動重新登入步驟）
-  │                 └─ 若失敗計數已達 2 → 後續輪次將跳過下單，僅繼續通知
-  │
-  ├─ 清空購物車（逐一點擊刪除按鈕）
-  │
-  ├─ 對每件商品：add_to_cart(guid, qty)
-  │     ├─ 計算數量：min(account_qty_limit, order_qty_limit, stock)
-  │     ├─ 等待 SPA 渲染（wait_for_selector，非固定 timeout）
-  │     └─ 若 qty > 1，先填數量輸入框再點按鈕
-  │
-  ├─ 【記憶體記錄已加入的 guid（_cart_added_guids）】
-  │     └─ 同一 run 內後續輪次偵測到此 guid → 跳過，不清購物車
-  │         （下次 run 開始時記憶體重置，若誠品已自動清空購物車則可重新嘗試）
-  │
-  ├─ 【立即發送購物車通知】→ ORDER_RECIPIENTS（含一鍵結帳連結）
-  │
-  ├─ checkout()
-  │     ├─ goto /cart → 點結帳 → 選「誠品門市取貨」
-  │     ├─ scrollBy(0, 400)（讓城市/門市下拉選單進入視窗）
-  │     ├─ 選城市（CHECKOUT_CITY）→ 選門市（CHECKOUT_STORE_CODE）
-  │     ├─ 點「ATM轉帳」→ 點「確認結帳」
-  │     ├─ wait_for_url "**/cart/step3**"
+  ├─ [背景 thread] 自動下單（與通知並行）
   │     │
-  │     ├─ 成功 → 發訂單確認通知 → 寫入 order_state（永久去重）
-  │     └─ 失敗 → log 警告（商品留購物車；下次 run 若庫存仍在可重新嘗試）
-  │
-  └─ 儲存最新 session cookies → 關閉結帳 context（session 只存在於本段期間）
+  │     ├─ BUY_KEYWORDS 白名單過濾：不在白名單的商品 → 只通知，不下單
+  │     ├─ PURCHASED_NAMES 符合 → 跳過下單（發通知給 ORDER_RECIPIENTS）
+  │     ├─ 過濾：移除 eslite_order_state.json 中已下單的 guid
+  │     ├─ 取前 CHECKOUT_MAX 件（預設 3）
+  │     │
+  │     ├─ 若無待下單商品 → 直接返回
+  │     │
+  │     ├─ 本次 run 內登入失敗已達 2 次 → 直接返回（僅繼續通知）
+  │     │
+  │     └─ ThreadPoolExecutor（每件商品獨立 worker，上限 PARALLEL_CHECKOUT_LIMIT）
+  │           └─ _checkout_one_product(product)  ← 每個 worker 流程：
+  │                 ├─ 建立獨立 Playwright BrowserContext（每件商品獨立瀏覽器）
+  │                 │     與監控 context 完全隔離，避免異地 IP session 衝突
+  │                 │
+  │                 ├─ PARALLEL_SESSION_MODE=fresh_login（預設）
+  │                 │     └─ _ensure_logged_in()：導覽 /member 確認 → 否則帳密登入
+  │                 │     PARALLEL_SESSION_MODE=storage
+  │                 │     └─ 預先取得 session state → 直接注入 cookies
+  │                 │
+  │                 ├─ 登入失敗
+  │                 │     ├─ 失敗計數 +1（thread-safe）
+  │                 │     ├─ 發送登入失敗警告（每 run 最多一封）
+  │                 │     └─ 失敗計數 ≥ 2 → 後續 worker 全部跳過登入
+  │                 │
+  │                 ├─ _cart_contains_product(guid)
+  │                 │     └─ 購物車已有此商品 → 直接結帳（不重複加入）
+  │                 │
+  │                 ├─ _add_to_cart(guid, qty)
+  │                 │     ├─ 計算數量：min(account_qty_limit, order_qty_limit, stock)
+  │                 │     ├─ wait_for_selector 等待加入按鈕渲染
+  │                 │     └─ 若 qty > 1，先填數量輸入框再點按鈕
+  │                 │
+  │                 ├─ 【發送購物車通知】→ ORDER_RECIPIENTS
+  │                 │
+  │                 ├─ _checkout()
+  │                 │     ├─ goto /cart → 點結帳 → 選「誠品門市取貨」
+  │                 │     ├─ scrollBy(0, 400)（讓城市/門市下拉選單進入視窗）
+  │                 │     ├─ 選城市（CHECKOUT_CITY）→ 選門市（CHECKOUT_STORE_CODE）
+  │                 │     ├─ 點「ATM轉帳」→ 點「確認結帳」
+  │                 │     └─ wait_for_url "**/cart/step3**"（含訂單編號）
+  │                 │
+  │                 ├─ 成功 → 發訂單確認通知 → 寫入 order_state（thread-safe，永久去重）
+  │                 └─ 關閉此商品的 BrowserContext → 儲存最新 session（atomic write）
+  └─
 ```
 
 > 誠品購物車**跨裝置、跨登入持久存在**，就算自動結帳失敗，商品仍留在購物車中，使用者可直接點購物車通知信中的連結手動完成結帳。
 
-### SKIP_KEYWORDS（通知但不自動下單，eslite_monitor）
+### BUY_KEYWORDS（自動下單白名單，eslite_monitor）
 
-以下商品偵測到有庫存時**發通知**，但**跳過自動下單**：
+與 Funbox 相同，誠品採用 **BUY_KEYWORDS 白名單**機制：商品名稱含以下任一關鍵字才執行自動下單，白名單外的商品只通知、不下單。
 
-| 關鍵字 | 備註 |
-|---|---|
-| `BX-11` `BX-25` `BX-26` `BX-33` `BX-43` | BX 系列 |
-| `BXG-29` `BXG-33` | BXG 系列 |
-| `蜘蛛人` `鋼鐵人` `薩諾斯` `綠惡魔` | Marvel 聯名 |
-| `路克天行者` `達斯維達` | Star Wars 聯名 |
-| `暴風天馬` `銀牙烈虎` `烈焰飛鳳` | 其他 |
+```python
+BUY_KEYWORDS = [
+    "BX-09",
+    "UX-17", "UX-21", "UX-15", "UX-04",
+    "BX-46",
+    "CX-16", "CX-04",
+    "UX-03", "UX-16",
+    "CX-11",
+    "UX-11", "UX-20", "UX-10",
+    "CX-07",
+    "UX-01",
+    "BX-35", "BX-48", "BX-49",
+    "CX-19",
+    "BX-50", "BX-34",
+    "CX-13", "CX-08", "CX-17", "CX-05",
+    "BX-42", "BX-29", "BX-30",
+    "BXG-22", "BXG-11",
+]
+```
 
-> 誠品無通知冷卻，每輪有庫存即通知。
+### PURCHASED_NAMES（已購商品，僅通知）
+
+環境變數 `ESLITE_PURCHASED_NAMES`（逗號分隔商品型號），符合的商品：
+- 寄發「已購買商品」獨立通知給 ORDER_RECIPIENTS
+- **不執行自動下單**
+
+### Holmes 搜尋過濾（`_is_holmes_beyblade_target`）
+
+`keyword` 和 `combined` 模式下，Holmes 搜尋 API 可能回傳書籍、漫畫、雜誌、發射器、收納配件等非目標商品。`_is_holmes_beyblade_target` 函式自動過濾，三層邏輯：
+
+| 層次 | 判斷依據 | 行為 |
+|---|---|---|
+| 第一層 | API 欄位 `is_book=yes` 或 `is_ebook=yes` | 直接排除 |
+| 第二層 | Category 含「中文書」「雜誌」「MOOK」「動漫畫」等 | 排除出版品 |
+| 第三層 | 名稱過濾 | 須含 `BEYBLADE` / `戰鬥陀螺` / `ベイブレード`；排除發射器、握把、收納盒、LAUNCHER 等配件 |
+
+**保留**：純 Beyblade X 陀螺（含 BX/UX/CX/BXG 型號）、戰鬥盤／競技盤。
 
 ### 下單去重
 
@@ -548,20 +579,19 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
 
 **誠品每帳號對同一商品限購一次，不論是哪次上架**。一旦商品寫入 `order_state`，後續所有輪次偵測到有庫存只會繼續通知，不會嘗試登入或下單。這也同時消除了 GitHub runner（美國 IP）與使用者（台灣）session 衝突的問題。
 
-同一個 **run** 內，已加入購物車的 guid 記錄在記憶體（`_cart_added_guids`）：同一 run 後續的 **round** 遇到該 guid 會直接跳過，不清空購物車。Run 結束後 VM 銷毀，記憶體重置——下一個 run 若商品仍有庫存且尚未成功下單，程式會重新嘗試加入購物車。
+每件商品下單前先以 `_cart_contains_product()` 確認購物車，若已有目標商品則直接結帳，不重複加入。
 
-> 若誠品因庫存歸零自動清空購物車，下一個 run 偵測到有新庫存即可重新加入，不受影響。
->
 > 若想讓程式重新嘗試已成功下單的商品，刪除 `eslite_order_state.json` 中對應的條目即可。
 
 ### Email 通知格式
 
 | 通知類型 | 收件人 | 觸發時機 | 附帶資訊 |
 |---|---|---|---|
-| **庫存通知** | 全體 GMAIL_RECIPIENTS | 每輪偵測到有庫存 | 商品名/庫存/上限/連結 + 一鍵結帳連結 |
+| **庫存通知** | 全體 GMAIL_RECIPIENTS | 偵測到有庫存（1 小時冷卻） | 商品名/庫存/上限/連結 + 一鍵結帳連結 |
+| **已購商品通知** | ORDER_RECIPIENTS | 偵測到 PURCHASED_NAMES 符合商品有庫存 | 商品名/連結（不含結帳，僅告知） |
 | **購物車通知** | ORDER_RECIPIENTS | 加入購物車成功後立即發 | 商品名/加入數量/上限 + 一鍵結帳連結 |
-| **訂單確認通知** | ORDER_RECIPIENTS | 自動結帳成功 | 訂單編號/付款方式/取貨門市/商品清單 |
-| **登入失敗警告** | ORDER_RECIPIENTS | Session 失效且無法自動登入（每次 run 最多觸發 2 次，之後停止嘗試） | 手動重新登入步驟說明 |
+| **訂單確認通知** | ORDER_RECIPIENTS | 自動結帳成功 | 訂單編號/商品清單 |
+| **登入失敗警告** | ORDER_RECIPIENTS | Session 失效且無法自動登入（每次 run 最多 1 封） | 手動重新登入步驟說明 |
 
 ### Session 持久化（跨 VM 關鍵）
 
@@ -687,7 +717,9 @@ CHECKOUT_STORE_CODE=B0XX
 CHECK_ROUNDS=1
 HEADLESS=false
 AUTO_CHECKOUT=true
+ESLITE_PURCHASED_NAMES=UX-21,BX-09     # 已購型號，只通知不下單（選填）
 ESLITE_API_URL={設定於 GitHub Variable ESLITE_API_URL}
+ESLITE_SEARCH_URL={設定於 GitHub Variable ESLITE_SEARCH_URL}
 ESLITE_EVENT_URL={設定於 GitHub Variable ESLITE_EVENT_URL}
 ```
 
@@ -722,11 +754,16 @@ ESLITE_EVENT_URL={設定於 GitHub Variable ESLITE_EVENT_URL}
 | `ESLITE_SEARCH_URL` | GitHub Variable `ESLITE_SEARCH_URL` | Holmes 搜尋 API URL，keyword / combined 模式必填 |
 | `ESLITE_EVENT_URL` | GitHub Variable `ESLITE_EVENT_URL` | 誠品書展活動頁 URL（選填，附於通知信末尾） |
 | `ESLITE_EXTRA_PRODUCTS` | Secret `ESLITE_EXTRA_PRODUCTS` | ProductMonitor 追蹤的商品 GUID，逗號分隔 |
+| `ESLITE_PURCHASED_NAMES` | Secret `ESLITE_PURCHASED_NAMES` | 已購買商品型號（逗號分隔），符合者只通知不下單 |
 | `CHECK_ROUNDS` | `1`（本機預設） | 執行輪數（書展：50，個別商品：35） |
-| `CHECKOUT_MAX` | `3` | 每次最多加入購物車的商品件數 |
+| `CHECKOUT_MAX` | `3` | 每次最多嘗試下單的商品件數 |
+| `PARALLEL_CHECKOUT_LIMIT` | 等於 `CHECKOUT_MAX` | 平行結帳 worker 上限（每件商品獨立瀏覽器） |
+| `ESLITE_PARALLEL_SESSION_MODE` | `fresh_login` | `fresh_login`：每個 worker 各自登入；`storage`：共用預登入 session |
+| `NOTIFY_COOLDOWN_HOURS` | `1` | 通知冷卻時間（小時），同商品 1 小時內不重複通知 |
 | `AUTO_CHECKOUT` | `true` | 設為 `false` 可停用自動下單（僅通知） |
 | `HEADLESS` | `true` | 設為 `false` 可在本機手動完成 reCAPTCHA |
 | `ORDER_STATE_FILE` | `eslite_order_state.json` | 下單去重狀態檔路徑（兩個 workflow 使用不同檔名） |
+| `NOTIFY_STATE_FILE` | `eslite_notify_state.json` | 通知冷卻狀態檔（1 小時冷卻去重） |
 | `STORAGE_STATE_FILE` | `eslite_storage_state.json` | Session cookies 存放路徑（兩個 workflow 共用） |
 
 ### 本機執行
@@ -792,6 +829,13 @@ python eslite_monitor.py
     path: eslite_monitor/eslite_product_order_state.json
     key: eslite-product-order-${{ github.run_id }}
     restore-keys: eslite-product-order-
+
+# 通知冷卻狀態（1 小時，key: eslite-notify-）
+- uses: actions/cache@v4
+  with:
+    path: eslite_monitor/eslite_notify_state.json
+    key: eslite-notify-${{ github.run_id }}
+    restore-keys: eslite-notify-
 
 # Session（兩個 workflow 共用，key: eslite-session-）
 - uses: actions/cache@v4

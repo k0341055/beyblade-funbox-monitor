@@ -3,7 +3,7 @@
 
 MONITOR_MODE=exhibition（預設）→ 監控書展 API（book_exhibits），不含個別追蹤商品
 MONITOR_MODE=product           → 監控 EXTRA_PRODUCT_GUIDS 個別追蹤商品
-MONITOR_MODE=keyword           → 監控 Holmes 搜尋 API；自動排除書籍/雜誌/無關商品，保留 Beyblade X 實體商品（含陀螺、戰鬥盤、通行證、握把等）
+MONITOR_MODE=keyword           → 監控 Holmes 搜尋 API；自動排除書籍/雜誌/周邊，只保留純 Beyblade X 陀螺與戰鬥盤
 MONITOR_MODE=combined          → 展覽 API + 已過濾的 Holmes 關鍵字搜尋結果合併
 
 兩種模式共用：登入、購物車、自動下單、Email 通知。
@@ -49,8 +49,6 @@ BUY_KEYWORDS: list[str] = [
     "UX-21",
     "UX-15",
     "UX-04",
-    "CX-00 新世紀福音戰士",
-    "BX-00 蒼龍神劍",
     "BX-46",
     "CX-16",
     "CX-04",
@@ -2513,18 +2511,15 @@ def _is_holmes_beyblade_target(
     """
     Holmes 關鍵字搜尋專用商品過濾。
 
-    只保留 BEYBLADE X / 戰鬥陀螺系列的實體商品，例如：
-    - 純戰鬥陀螺
-    - 戰鬥盤／陀螺盤
-    - 通行證
-    - 握把
-    - 發射器
-    - 其他 Beyblade X 實體配件
+    只保留：
+    1. BEYBLADE X / 戰鬥陀螺系列的實體陀螺商品
+    2. BEYBLADE X / 戰鬥陀螺系列的戰鬥盤／陀螺盤
 
     排除：
     - 書籍、漫畫、電子書、外文書、童書
     - 雜誌、MOOK、Guide、附錄類商品
-    - 一般非 BEYBLADE X 的陀螺玩具或無關商品
+    - 一般非 BEYBLADE X 的陀螺玩具
+    - 發射器、握把、通行證、收納盒／包等配件
     """
 
     name = str(
@@ -2629,7 +2624,7 @@ def _is_holmes_beyblade_target(
     if not beyblade_context:
         return False
 
-    # Beyblade X 的戰鬥盤 / 陀螺盤直接保留。
+    # 戰鬥盤 / 陀螺盤直接保留。
     stadium_keywords = (
         "戰鬥盤",
         "陀螺盤",
@@ -2644,9 +2639,7 @@ def _is_holmes_beyblade_target(
     ):
         return True
 
-    # 其餘 Beyblade X 實體商品通常會帶 BX / UX / CX / BXG 型號。
-    # 這裡不再排除通行證、握把、發射器等配件；
-    # 是否要「自動下單」仍交由 BUY_KEYWORDS 決定。
+    # 純陀螺商品通常會帶 BX / UX / CX / BXG 型號。
     has_beyblade_code = bool(
         re.search(
             r"(?<![A-Z0-9])"
@@ -2656,28 +2649,36 @@ def _is_holmes_beyblade_target(
         )
     )
 
-    if has_beyblade_code:
-        return True
+    if not has_beyblade_code:
+        return False
 
-    # 少數實體配件名稱可能未帶標準型號，
-    # 但明確寫出 Beyblade / 戰鬥陀螺系列名稱時仍保留。
-    physical_accessory_keywords = (
-        "通行證",
+    # 型號商品中仍可能是發射器、收納、通行證等配件，
+    # 這些不是使用者要的「純陀螺或陀螺盤」。
+    accessory_keywords = (
+        "發射器",
+        "發射握把",
         "握把",
         "握柄",
-        "發射器",
+        "通行證",
+        "收納",
+        "收納盒",
+        "收納包",
+        "陀螺盒",
+        "保護套",
         "LAUNCHER",
         "GRIP",
-        "PASS",
+        "GEAR CASE",
+        "CASE",
+        "HOLDER",
     )
 
     if any(
         kw in name_upper
-        for kw in physical_accessory_keywords
+        for kw in accessory_keywords
     ):
-        return True
+        return False
 
-    return False
+    return True
 
 
 def _parse_holmes_response(
@@ -2843,13 +2844,13 @@ def _parse_holmes_response(
         log.info(
             "Holmes 搜尋已排除 "
             f"{filtered_non_target} 件"
-            "書籍／雜誌／非 Beyblade 實體商品"
+            "書籍／雜誌／非陀螺／非戰鬥盤商品"
         )
 
     log.info(
         "Holmes 搜尋保留 "
         f"{len(result)} 件"
-        "Beyblade X 實體有貨商品"
+        "純 Beyblade X 陀螺／戰鬥盤有貨商品"
     )
 
     return result
