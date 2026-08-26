@@ -2258,14 +2258,26 @@ class ExhibitionMonitor(
 
         super().__init__()
 
-        self.API_URL = (
+        api_urls_raw = (
             os.environ.get(
                 "ESLITE_API_URL",
                 "",
             ).strip()
         )
 
-        if not self.API_URL:
+        self.API_URLS = [
+            u.strip()
+            for u in api_urls_raw.split(",")
+            if u.strip()
+        ]
+
+        self.API_URL = (
+            self.API_URLS[0]
+            if self.API_URLS
+            else ""
+        )
+
+        if not self.API_URLS:
 
             raise ValueError(
                 "ESLITE_API_URL 未設定"
@@ -2398,37 +2410,40 @@ class ExhibitionMonitor(
     def _fetch_exhibition(
         self,
         page,
+        url=None,
     ):
 
-        page.goto(
-            self.API_URL,
-            wait_until="domcontentloaded",
-            timeout=30000,
+        target_url = (
+            url
+            if url is not None
+            else (
+                self.API_URLS[0]
+                if self.API_URLS
+                else ""
+            )
         )
 
-        page.wait_for_timeout(
-            1500
-        )
+        if not target_url:
 
-        try:
+            return []
 
-            raw = page.inner_text(
-                "pre"
-            )
+        if "eslite.com/exhibitions/" in target_url:
 
-        except Exception:
-
-            raw = page.inner_text(
-                "body"
-            )
-
-        all_products = (
-            self._extract_products(
-                json.loads(
-                    raw
+            all_products = (
+                self._fetch_exhibition_page(
+                    page,
+                    target_url,
                 )
             )
-        )
+
+        else:
+
+            all_products = (
+                self._fetch_exhibition_api(
+                    page,
+                    target_url,
+                )
+            )
 
         if self.MONITOR_KEYWORDS:
 
@@ -2468,13 +2483,131 @@ class ExhibitionMonitor(
 
         return result
 
+    def _fetch_exhibition_api(
+        self,
+        page,
+        url,
+    ):
+
+        page.goto(
+            url,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+
+        page.wait_for_timeout(
+            1500
+        )
+
+        try:
+
+            raw = page.inner_text(
+                "pre"
+            )
+
+        except Exception:
+
+            raw = page.inner_text(
+                "body"
+            )
+
+        return self._extract_products(
+            json.loads(raw)
+        )
+
+    def _fetch_exhibition_page(
+        self,
+        page,
+        url,
+    ):
+
+        captured = []
+
+        lock = threading.Lock()
+
+        def on_response(response):
+
+            try:
+
+                ct = response.headers.get(
+                    "content-type",
+                    "",
+                )
+
+                if "application/json" not in ct:
+
+                    return
+
+                if "eslite.com" not in response.url:
+
+                    return
+
+                data = response.json()
+
+                with lock:
+
+                    captured.append(data)
+
+            except Exception:
+
+                pass
+
+        page.on(
+            "response",
+            on_response,
+        )
+
+        try:
+
+            page.goto(
+                url,
+                wait_until="networkidle",
+                timeout=30000,
+            )
+
+            page.wait_for_timeout(
+                2000
+            )
+
+        finally:
+
+            page.remove_listener(
+                "response",
+                on_response,
+            )
+
+        all_products = {}
+
+        for data in captured:
+
+            all_products.update(
+                self._extract_products(data)
+            )
+
+        return all_products
+
     def fetch_in_stock_products(
         self,
         page,
     ):
 
-        return self._fetch_exhibition(
-            page
+        all_products = {}
+
+        for url in self.API_URLS:
+
+            for p in self._fetch_exhibition(
+                page,
+                url,
+            ):
+
+                if p["guid"] not in all_products:
+
+                    all_products[
+                        p["guid"]
+                    ] = p
+
+        return list(
+            all_products.values()
         )
 
 
@@ -2935,11 +3068,23 @@ class CombinedMonitor(
             self
         )
 
-        self.API_URL = (
+        api_urls_raw = (
             os.environ.get(
                 "ESLITE_API_URL",
                 "",
             ).strip()
+        )
+
+        self.API_URLS = [
+            u.strip()
+            for u in api_urls_raw.split(",")
+            if u.strip()
+        ]
+
+        self.API_URL = (
+            self.API_URLS[0]
+            if self.API_URLS
+            else ""
         )
 
         kw_env = (
@@ -3007,7 +3152,7 @@ class CombinedMonitor(
 
         def run_exhibition():
 
-            if not self.API_URL:
+            if not self.API_URLS:
 
                 return []
 
@@ -3041,9 +3186,26 @@ class CombinedMonitor(
 
                         try:
 
-                            return self._fetch_exhibition(
-                                worker_page
-                            )
+                            seen = set()
+
+                            results = []
+
+                            for url in self.API_URLS:
+
+                                for p in self._fetch_exhibition(
+                                    worker_page,
+                                    url,
+                                ):
+
+                                    if p["guid"] not in seen:
+
+                                        seen.add(
+                                            p["guid"]
+                                        )
+
+                                        results.append(p)
+
+                            return results
 
                         finally:
 
