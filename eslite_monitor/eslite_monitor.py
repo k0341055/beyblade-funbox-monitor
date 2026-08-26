@@ -97,6 +97,8 @@ class EsliteMonitorBase(ABC):
             timedelta(hours=8)
         )
 
+        # Secret ESLITE_EXTRA_PRODUCTS 目前追蹤商品：
+        # BX-35、UX-04、UX-20、CX-18（GUID 存於 GitHub Secret，勿 hardcode）
         extra_env = os.environ.get(
             "ESLITE_EXTRA_PRODUCTS",
             "",

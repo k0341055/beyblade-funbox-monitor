@@ -29,9 +29,9 @@ flowchart TD
 
     PW1 --> SITE1["1999.co.jp\nBeyblade X 搜尋頁\nCloudflare 保護"]
     REQ --> SITE2["shop.funbox.com.tw\nCyberbiz /products.json API"]
-    PW3 -->|平行 BrowserContext| SITE3A["athena.eslite.com\nbook_exhibits API\nCloudflare 保護"]
+    PW3 -->|平行 BrowserContext| SITE3A["athena.eslite.com\nbook_exhibits / 策展 API\nCloudflare 保護（多 URL）"]
     PW3 -->|平行 BrowserContext| SITE3B["holmes.eslite.com\nHolmes 搜尋 API\nCloudflare 保護"]
-    PW4 --> SITE4["athena.eslite.com\nproducts/{guid} API\n個別商品庫存"]
+    PW4 --> SITE4["athena.eslite.com\nproducts/{guid} API\n個別商品庫存（Secret GUID）"]
 
     SITE1 --> COOL1["1 小時冷卻\nseen_products.json"]
     SITE2 --> COOL2["1 小時冷卻\nseen_products.json"]
@@ -385,7 +385,13 @@ EsliteMonitorBase (ABC)
   ├─ 共用：登入、購物車、結帳、Email 通知、session 持久化、下單去重、通知冷卻
   │
   ├─ ExhibitionMonitor（MONITOR_MODE=exhibition）
-  │     └─ 呼叫 book_exhibits API → 遞迴解析書展 JSON → ~6 秒/輪 → 50 輪/次
+  │     ├─ ESLITE_API_URL 支援逗號分隔多個 URL（策展或 Athena API 皆可）
+  │     ├─ _fetch_exhibition(url)：依 URL 格式自動分派
+  │     │     ├─ eslite.com/exhibitions/ → _fetch_exhibition_page()
+  │     │     │     page.on("response") 攔截 JSON API 回應，自動擷取商品資料
+  │     │     └─ Athena API URL → _fetch_exhibition_api()
+  │     │           直接 GET JSON，遞迴解析所有 product_guid 節點
+  │     └─ fetch_in_stock_products() 依序遍歷所有 URL，以 guid 去重合併
   │
   ├─ KeywordSearchMonitor（MONITOR_MODE=keyword）
   │     └─ 呼叫 Holmes 搜尋 API → _is_holmes_beyblade_target 過濾
@@ -394,12 +400,14 @@ EsliteMonitorBase (ABC)
   ├─ CombinedMonitor（MONITOR_MODE=combined，eslite_monitor.yml 預設）
   │     ├─ 繼承自 ExhibitionMonitor（共用 _fetch_exhibition）
   │     └─ ThreadPoolExecutor(max_workers=2) 平行執行
-  │           ├─ _fetch_exhibition()（書展 API，ESLITE_API_URL 未設定則跳過）
-  │           └─ _fetch_keyword_search()（Holmes API，經 _is_holmes_beyblade_target 過濾）
+  │           ├─ run_exhibition()：同一瀏覽器依序抓取所有 ESLITE_API_URL
+  │           │     （Athena API URL 或 eslite.com/exhibitions/ 均支援）
+  │           └─ run_search()：Holmes API，經 _is_holmes_beyblade_target 過濾
   │           → 結果以 guid 去重合併，書展 API 資料優先
   │
   └─ ProductMonitor（MONITOR_MODE=product）
         └─ 逐一呼叫 products/{guid} API → ~6 秒/輪 → 35 輪/次
+              （追蹤商品 GUID 存於 Secret ESLITE_EXTRA_PRODUCTS）
 ```
 
 各模式分別由獨立 GitHub Actions workflow 觸發，各使用獨立的 `ORDER_STATE_FILE`（避免下單狀態互相干擾）：
@@ -413,9 +421,14 @@ EsliteMonitorBase (ABC)
 
 ### 偵測邏輯
 
-**ExhibitionMonitor（書展 API）**
+**ExhibitionMonitor（書展 / 策展監控）**
 
-使用 Playwright 開啟 `athena.eslite.com/api/v1/book_exhibits/{EXHIBITION_ID}`（繞過 Cloudflare），對 JSON 回應進行**遞迴解析**，不限巢狀深度找出所有含 `product_guid` + `name` 的節點。每輪只呼叫一次 API，約 6 秒。
+`ESLITE_API_URL` 支援**逗號分隔多個 URL**，每輪依序抓取、以 guid 去重合併。URL 格式自動判斷：
+
+| URL 格式 | 抓取方式 | 說明 |
+|---|---|---|
+| `athena.eslite.com/api/v1/...` | `_fetch_exhibition_api()` | 直接 GET JSON，遞迴解析所有 `product_guid` 節點 |
+| `eslite.com/exhibitions/CUXXX` | `_fetch_exhibition_page()` | 訪問策展 HTML 頁，`page.on("response")` 攔截所有 `eslite.com` JSON 回應自動擷取商品 |
 
 書展 API 解析欄位：
 
@@ -429,11 +442,11 @@ EsliteMonitorBase (ABC)
 
 **CombinedMonitor（合併監控，eslite_monitor.yml 預設）**
 
-以 `ThreadPoolExecutor(max_workers=2)` 平行啟動兩個獨立 `BrowserContext`，同時抓取書展 API 與 Holmes 搜尋 API，最後以 `guid` 去重合併（書展 API 資料優先）：
+以 `ThreadPoolExecutor(max_workers=2)` 平行啟動兩個獨立 `BrowserContext`，同時抓取策展來源與 Holmes 搜尋 API，最後以 `guid` 去重合併（書展 / 策展 API 資料優先）。`run_exhibition()` 在**同一個瀏覽器**內依序遍歷所有 `ESLITE_API_URL`，節省資源：
 
 | 來源 | API 端點 | 有庫存判斷 |
 |---|---|---|
-| 書展 API | `athena.eslite.com/api/v1/book_exhibits/...` | `stock > 0` |
+| 書展 / 策展（多 URL） | `ESLITE_API_URL`（逗號分隔） | `stock > 0` |
 | Holmes 搜尋 API | `holmes.eslite.com/v1/search?...` | `availability == "IN_STOCK"` |
 
 Holmes API 欄位格式（與書展 API 不同，解析時分別處理）：
@@ -640,7 +653,7 @@ API 目標 URL 存放於 Variables（内容可見，但不暴露在程式碼中�
 |---|---|---|
 | `FUNBOX_SEARCH_URL` | Funbox | Funbox 戰鬥陀螺集合頁 URL |
 | `SEARCH_URL_1999` | 1999 | 1999.co.jp Beyblade X 搜尋頁 URL |
-| `ESLITE_API_URL` | 誠品書展 | 誠品書展 API URL（`athena.eslite.com/api/v1/book_exhibits/...`） |
+| `ESLITE_API_URL` | 誠品書展／策展 | 監控目標 URL，逗號分隔可填多個。支援 Athena API URL（`athena.eslite.com/...`）或策展頁 URL（`eslite.com/exhibitions/CUXXX`） |
 | `ESLITE_EVENT_URL` | 誠品 | 誠品書展活動頁 URL（選填，附於通知信末尾） |
 | `ESLITE_SEARCH_URL` | 誠品關鍵字 | Holmes 搜尋 API URL（`holmes.eslite.com/v1/search?...`，combined / keyword 模式必填） |
 
@@ -664,7 +677,7 @@ API 目標 URL 存放於 Variables（内容可見，但不暴露在程式碼中�
 | `ORDER_RECIPIENT` | 誠品 | 下單/購物車通知收件人（逗號分隔） |
 | `CHECKOUT_CITY` | 誠品 | 取貨城市（如 `XX市`） |
 | `CHECKOUT_STORE_CODE` | 誠品 | 門市代碼（如 `B0XX` XX門市） |
-| `ESLITE_EXTRA_PRODUCTS` | 誠品個別商品 | 要追蹤的商品 GUID，逗號分隔（ProductMonitor 使用） |
+| `ESLITE_EXTRA_PRODUCTS` | 誠品個別商品 | 要追蹤的商品 GUID，逗號分隔（ProductMonitor 使用）。目前追蹤：BX-35、UX-04、UX-20、CX-18 |
 | `ACCOUNT_1999` | 1999 | 1999.co.jp 登入 email |
 | `PASSWORD_1999` | 1999 | 1999.co.jp 登入密碼 |
 | `AMAZON_ACCOUNT` | 1999 | Amazon Japan 登入 email（Amazon Pay 授權用） |
