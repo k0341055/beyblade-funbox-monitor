@@ -1865,13 +1865,33 @@ class EsliteMonitorBase(ABC):
             self._load_order_state()
         )
 
-        whitelist_products = [
-            p
-            for p in in_stock_products
-            if self._is_buy_whitelisted(
+        def _buy_priority(p):
+
+            name = p.get(
+                "name",
+                "",
+            ).upper()
+
+            for i, kw in enumerate(
+                BUY_KEYWORDS
+            ):
+
+                if kw.upper() in name:
+
+                    return i
+
+            return len(BUY_KEYWORDS)
+
+        whitelist_products = sorted(
+            [
                 p
-            )
-        ]
+                for p in in_stock_products
+                if self._is_buy_whitelisted(
+                    p
+                )
+            ],
+            key=_buy_priority,
+        )
 
         to_order = [
             p
