@@ -25,7 +25,7 @@ flowchart TD
     GA1 --> PW1["Playwright async\n30 輪 / 次（約 5 分鐘）\n隨機 UA + viewport"]
     GA2 --> REQ["requests.Session 登入/加購\n+ Playwright 結帳\n60 輪 / 次（約 5 分鐘）\n連續 3 輪失敗 → 提早結束"]
     GA3 --> PW3["CombinedMonitor（預設）\nPlaywright sync + ThreadPoolExecutor\n50 輪 / 次（約 5 分鐘）\n監控 context 匿名"]
-    GA4 --> PW4["ProductMonitor\nPlaywright sync\n35 輪 / 次（約 3.5 分鐘）\n監控 context 匿名"]
+    GA4 --> PW4["ProductMonitor\nPlaywright sync\n50 輪 / 次（約 5 分鐘）\n監控 context 匿名"]
 
     PW1 --> SITE1["1999.co.jp\nBeyblade X 搜尋頁\nCloudflare 保護"]
     REQ --> SITE2["shop.funbox.com.tw\nCyberbiz /products.json API"]
@@ -91,7 +91,7 @@ beyblade-funbox-monitor/
 | 偵測商品 | Beyblade X 系列 | 戰鬥陀螺集合頁 | Beyblade X 書展 API | `ESLITE_EXTRA_PRODUCTS` GUID 清單 |
 | 反爬蟲機制 | Cloudflare（隨機 UA/viewport/locale） | Cyberbiz `/products.json`（無反爬） | Cloudflare（Playwright 繞過） | Cloudflare（Playwright 繞過） |
 | 技術架構 | Playwright async | requests 登入/加購 + Playwright 結帳 | `CombinedMonitor`（OOP，Playwright sync + ThreadPoolExecutor 平行抓取，預設） | `ProductMonitor`（OOP，Playwright sync） |
-| 每次執行輪數 | **30 輪**（間隔 5~8 秒） | **60 輪**（間隔 3~5 秒） | **50 輪**（間隔 3~5 秒） | **35 輪**（間隔 3~5 秒） |
+| 每次執行輪數 | **30 輪**（間隔 5~8 秒） | **60 輪**（間隔 3~5 秒） | **50 輪**（間隔 3~5 秒） | **50 輪**（間隔 3~5 秒） |
 | 執行時長 / timeout | ~5 分鐘 / 25 min | ~5 分鐘 / 25 min | ~5 分鐘 / 25 min | ~3.5 分鐘 / 25 min |
 | 通知冷卻 | 1 小時冷卻 | 1 小時冷卻 | **無冷卻（每輪有庫存即通知）** | **無冷卻（每輪有庫存即通知）** |
 | 自動下單 | **有**（Amazon Pay，需預存 session） | **有**（3 帳號平行，7-11貨到付款 / 取貨先付款） | **有**（加入購物車 + 自動結帳） | **有**（加入購物車 + 自動結帳） |
