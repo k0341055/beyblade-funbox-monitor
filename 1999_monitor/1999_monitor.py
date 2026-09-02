@@ -827,7 +827,8 @@ async def _login_1999(page) -> bool:
 
         await page.wait_for_url(
             f"{BASE_URL}/",
-            timeout=15_000,
+            wait_until="domcontentloaded",
+            timeout=30_000,
         )
 
         log.info(
