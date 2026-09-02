@@ -3013,6 +3013,21 @@ def _parse_holmes_response(
     return result
 
 
+def _make_page2_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    params = urllib.parse.parse_qs(
+        parsed.query,
+        keep_blank_values=True,
+    )
+    params["page_no"] = ["2"]
+    new_query = urllib.parse.urlencode(
+        {k: v[0] for k, v in params.items()}
+    )
+    return urllib.parse.urlunparse(
+        parsed._replace(query=new_query)
+    )
+
+
 class KeywordSearchMonitor(
     EsliteMonitorBase
 ):
@@ -3023,14 +3038,20 @@ class KeywordSearchMonitor(
 
         super().__init__()
 
-        self.SEARCH_URL = (
+        search_urls_raw = (
             os.environ.get(
                 "ESLITE_SEARCH_URL",
                 "",
             ).strip()
         )
 
-        if not self.SEARCH_URL:
+        self.SEARCH_URLS = [
+            u.strip()
+            for u in search_urls_raw.split(",")
+            if u.strip()
+        ]
+
+        if not self.SEARCH_URLS:
 
             raise ValueError(
                 "ESLITE_SEARCH_URL 未設定"
@@ -3041,32 +3062,55 @@ class KeywordSearchMonitor(
         page,
     ):
 
-        page.goto(
-            self.SEARCH_URL,
-            wait_until="domcontentloaded",
-            timeout=30000,
-        )
+        merged = {}
 
-        page.wait_for_timeout(
-            1500
-        )
+        for base_url in self.SEARCH_URLS:
 
-        try:
+            for page_url in (
+                base_url,
+                _make_page2_url(base_url),
+            ):
 
-            raw = page.inner_text(
-                "pre"
-            )
+                try:
 
-        except Exception:
+                    page.goto(
+                        page_url,
+                        wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
 
-            raw = page.inner_text(
-                "body"
-            )
+                    page.wait_for_timeout(
+                        1500
+                    )
 
-        return _parse_holmes_response(
-            self.ESLITE_BASE,
-            raw,
-        )
+                    try:
+
+                        raw = page.inner_text(
+                            "pre"
+                        )
+
+                    except Exception:
+
+                        raw = page.inner_text(
+                            "body"
+                        )
+
+                    for p in _parse_holmes_response(
+                        self.ESLITE_BASE,
+                        raw,
+                    ):
+
+                        if p["guid"] not in merged:
+
+                            merged[p["guid"]] = p
+
+                except Exception as e:
+
+                    log.warning(
+                        f"Holmes 搜尋失敗 {page_url}：{e}"
+                    )
+
+        return list(merged.values())
 
     def fetch_in_stock_products(
         self,
@@ -3122,14 +3166,20 @@ class CombinedMonitor(
             if k.strip()
         ]
 
-        self.SEARCH_URL = (
+        search_urls_raw = (
             os.environ.get(
                 "ESLITE_SEARCH_URL",
                 "",
             ).strip()
         )
 
-        if not self.SEARCH_URL:
+        self.SEARCH_URLS = [
+            u.strip()
+            for u in search_urls_raw.split(",")
+            if u.strip()
+        ]
+
+        if not self.SEARCH_URLS:
 
             raise ValueError(
                 "ESLITE_SEARCH_URL 未設定"
@@ -3140,32 +3190,55 @@ class CombinedMonitor(
         page,
     ):
 
-        page.goto(
-            self.SEARCH_URL,
-            wait_until="domcontentloaded",
-            timeout=30000,
-        )
+        merged = {}
 
-        page.wait_for_timeout(
-            1500
-        )
+        for base_url in self.SEARCH_URLS:
 
-        try:
+            for page_url in (
+                base_url,
+                _make_page2_url(base_url),
+            ):
 
-            raw = page.inner_text(
-                "pre"
-            )
+                try:
 
-        except Exception:
+                    page.goto(
+                        page_url,
+                        wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
 
-            raw = page.inner_text(
-                "body"
-            )
+                    page.wait_for_timeout(
+                        1500
+                    )
 
-        return _parse_holmes_response(
-            self.ESLITE_BASE,
-            raw,
-        )
+                    try:
+
+                        raw = page.inner_text(
+                            "pre"
+                        )
+
+                    except Exception:
+
+                        raw = page.inner_text(
+                            "body"
+                        )
+
+                    for p in _parse_holmes_response(
+                        self.ESLITE_BASE,
+                        raw,
+                    ):
+
+                        if p["guid"] not in merged:
+
+                            merged[p["guid"]] = p
+
+                except Exception as e:
+
+                    log.warning(
+                        f"Holmes 搜尋失敗 {page_url}：{e}"
+                    )
+
+        return list(merged.values())
 
     def fetch_in_stock_products(
         self,

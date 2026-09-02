@@ -394,6 +394,7 @@ EsliteMonitorBase (ABC)
   │     └─ fetch_in_stock_products() 依序遍歷所有 URL，以 guid 去重合併
   │
   ├─ KeywordSearchMonitor（MONITOR_MODE=keyword）
+  │     ├─ ESLITE_SEARCH_URL 支援逗號分隔多個 URL，每個 URL 各抓第 1、2 頁
   │     └─ 呼叫 Holmes 搜尋 API → _is_holmes_beyblade_target 過濾
   │           → 只保留純 Beyblade X 陀螺／戰鬥盤，自動排除書籍／雜誌／配件
   │
@@ -402,8 +403,9 @@ EsliteMonitorBase (ABC)
   │     └─ ThreadPoolExecutor(max_workers=2) 平行執行
   │           ├─ run_exhibition()：同一瀏覽器依序抓取所有 ESLITE_API_URL
   │           │     （Athena API URL 或 eslite.com/exhibitions/ 均支援）
-  │           └─ run_search()：Holmes API，經 _is_holmes_beyblade_target 過濾
-  │           → 結果以 guid 去重合併，書展 API 資料優先
+  │           └─ run_search()：Holmes API，逗號分隔多 URL，每 URL 抓 2 頁
+  │                 → _is_holmes_beyblade_target 過濾，結果以 guid 去重合併
+  │           → 最終以 guid 去重合併，書展 API 資料優先
   │
   └─ ProductMonitor（MONITOR_MODE=product）
         └─ 逐一呼叫 products/{guid} API → ~6 秒/輪 → 35 輪/次
@@ -463,7 +465,7 @@ Holmes 搜尋結果經 `_is_holmes_beyblade_target()` 三層過濾，只保留�
 
 **KeywordSearchMonitor（MONITOR_MODE=keyword）**
 
-單獨執行 Holmes 搜尋 API，不含書展 API，適用於書展已下架但關鍵字仍有商品的情境。結果同樣經 `_is_holmes_beyblade_target()` 過濾。
+單獨執行 Holmes 搜尋 API，不含書展 API，適用於書展已下架但關鍵字仍有商品的情境。`ESLITE_SEARCH_URL` 支援**逗號分隔多個 URL**，每個 URL 各自抓取第 1 頁與第 2 頁，結果以 guid 去重合併。結果同樣經 `_is_holmes_beyblade_target()` 過濾。
 
 **ProductMonitor（個別商品）**
 
@@ -655,7 +657,7 @@ API 目標 URL 存放於 Variables（内容可見，但不暴露在程式碼中�
 | `SEARCH_URL_1999` | 1999 | 1999.co.jp Beyblade X 搜尋頁 URL |
 | `ESLITE_API_URL` | 誠品書展／策展 | 監控目標 URL，逗號分隔可填多個。支援 Athena API URL（`athena.eslite.com/...`）或策展頁 URL（`eslite.com/exhibitions/CUXXX`） |
 | `ESLITE_EVENT_URL` | 誠品 | 誠品書展活動頁 URL（選填，附於通知信末尾） |
-| `ESLITE_SEARCH_URL` | 誠品關鍵字 | Holmes 搜尋 API URL（`holmes.eslite.com/v1/search?...`，combined / keyword 模式必填） |
+| `ESLITE_SEARCH_URL` | 誠品關鍵字 | Holmes 搜尋 API URL（`holmes.eslite.com/v1/search?...`，combined / keyword 模式必填）。逗號分隔可填多個 URL，每個 URL 各抓第 1、2 頁。**請勿加 `&status=add_to_shopping_cart`（此篩選不可靠，會漏掉有庫存商品）** |
 
 > 設定路徑：GitHub Repo → Settings → Secrets and variables → Actions → **Variables** 標籤 → New repository variable
 
@@ -764,7 +766,7 @@ ESLITE_EVENT_URL={設定於 GitHub Variable ESLITE_EVENT_URL}
 |---|---|---|
 | `MONITOR_MODE` | `combined`（Actions 預設） | `combined`（書展+搜尋合併）、`keyword`（搜尋）、`exhibition`（書展 API）、`product`（個別商品） |
 | `ESLITE_API_URL` | GitHub Variable `ESLITE_API_URL` | ExhibitionMonitor / combined 模式使用，書展下架可留空 |
-| `ESLITE_SEARCH_URL` | GitHub Variable `ESLITE_SEARCH_URL` | Holmes 搜尋 API URL，keyword / combined 模式必填 |
+| `ESLITE_SEARCH_URL` | GitHub Variable `ESLITE_SEARCH_URL` | Holmes 搜尋 API URL，keyword / combined 模式必填。逗號分隔可填多個，每 URL 各抓 2 頁。請勿加 `status=add_to_shopping_cart` |
 | `ESLITE_EVENT_URL` | GitHub Variable `ESLITE_EVENT_URL` | 誠品書展活動頁 URL（選填，附於通知信末尾） |
 | `ESLITE_EXTRA_PRODUCTS` | Secret `ESLITE_EXTRA_PRODUCTS` | ProductMonitor 追蹤的商品 GUID，逗號分隔 |
 | `ESLITE_PURCHASED_NAMES` | Secret `ESLITE_PURCHASED_NAMES` | 已購買商品型號（逗號分隔），符合者只通知不下單 |
