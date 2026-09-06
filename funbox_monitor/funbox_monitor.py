@@ -11,6 +11,7 @@ import os
 import random
 import re
 import smtplib
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -89,6 +90,14 @@ _CHECKOUT_LIMIT_TEXTS = ["最多只能購買", "達購買上限", "超過購買�
 # 結帳時商品已售完（庫存在加入購物車後被搶走，URL 不會變但頁面有提示文字）
 _CHECKOUT_STOCK_OUT_TEXTS = ["庫存不足", "數量不足", "已無庫存", "商品已售完", "無法結帳", "庫存已不足", "商品已下架", "out of stock"]
 
+# 登入受限流時可能出現在 body 的關鍵字（HTTP 200 但回傳錯誤頁）
+_RETRY_LATER_WORDS = (
+    "retry later",
+    "too many requests",
+    "請稍後再試",
+    "操作過於頻繁",
+)
+
 # ── 完全靜默的商品關鍵字（不通知、不下單）──────────────
 SKIP_KEYWORDS: list[str] = [
     "APP",
@@ -144,6 +153,10 @@ PRIORITY_KEYWORDS: list[str] = (
 CHECKOUT_MODE = os.environ.get("CHECKOUT_MODE", "sequential").strip().lower()
 PARALLEL_CHECKOUT_LIMIT = int(os.environ.get("PARALLEL_CHECKOUT_LIMIT", "6"))
 
+# ── 登入限流熔斷器（跨 thread 共用）─────────────────────────────
+_login_gate_lock = threading.Lock()
+_login_blocked_until: float = 0.0
+
 
 def is_random_product(p: dict) -> bool:
     """隨機強化組 / 抽抽包類商品，每輪都嘗試購買（限購較寬，通常 3 個）。"""
@@ -160,6 +173,30 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 log = logging.getLogger(__name__)
+
+
+def _assert_login_gate_open() -> None:
+    """若限流熔斷器仍在冷卻中，raise RuntimeError 阻止後續登入。"""
+    with _login_gate_lock:
+        remaining = _login_blocked_until - time.monotonic()
+    if remaining > 0:
+        raise RuntimeError(f"login_gate_blocked remaining={remaining:.1f}s")
+
+
+def _register_login_rate_limit(retry_after=None) -> None:
+    """記錄一次限流事件，啟動全域冷卻（其他 thread 暫停登入）。"""
+    global _login_blocked_until
+    try:
+        ra = int(retry_after) if retry_after is not None and str(retry_after).strip().isdigit() else None
+    except (ValueError, TypeError):
+        ra = None
+    cooldown = max(30, min(ra or 60, 300))
+    with _login_gate_lock:
+        _login_blocked_until = max(
+            _login_blocked_until,
+            time.monotonic() + cooldown,
+        )
+    log.warning(f"登入限流熔斷器啟動（冷卻 {cooldown}s）")
 
 
 def _mask_email(email: str) -> str:
@@ -358,11 +395,52 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
     sess = requests.Session()
     sess.headers["User-Agent"] = _UA
     try:
-        r = sess.get(f"{BASE_URL}/account/login", timeout=10)
-        token = _extract_csrf(r.text)
-        if not token:
-            log.error(f"[{email}] 登入頁找不到 CSRF token")
+        try:
+            _assert_login_gate_open()
+        except RuntimeError as gate_err:
+            log.warning(f"[{email}] 登入跳過（限流冷卻中）：{gate_err}")
             return {"added": [], "attempted": attempted, "checkout": {}}
+
+        try:
+            r = sess.get(f"{BASE_URL}/account/login", timeout=(4, 12))
+        except requests.ReadTimeout:
+            log.error(f"[{email}] 登入頁讀取逾時")
+            return {"added": [], "attempted": attempted, "checkout": {}}
+
+        body = r.text or ""
+        body_lower = body.lower()
+
+        if r.status_code in (429, 503) or any(
+            w in body_lower for w in _RETRY_LATER_WORDS
+        ):
+            retry_after = r.headers.get("Retry-After")
+            log.error(
+                f"[{email}] 登入受限流（HTTP {r.status_code}），"
+                f"retry_after={retry_after or 'unknown'}"
+            )
+            _register_login_rate_limit(retry_after)
+            return {"added": [], "attempted": attempted, "checkout": {}}
+
+        if r.status_code != 200:
+            log.error(f"[{email}] 登入頁 HTTP {r.status_code}")
+            return {"added": [], "attempted": attempted, "checkout": {}}
+
+        ct = r.headers.get("Content-Type", "").lower()
+        if "text/html" not in ct and "application/xhtml+xml" not in ct:
+            log.error(f"[{email}] 登入頁 Content-Type 異常：{ct or 'missing'}")
+            return {"added": [], "attempted": attempted, "checkout": {}}
+
+        if "/account/login" not in r.url:
+            log.error(f"[{email}] 登入頁重導向至 {r.url}")
+            return {"added": [], "attempted": attempted, "checkout": {}}
+
+        token = _extract_csrf(body)
+        if not token:
+            log.error(
+                f"[{email}] CSRF token 缺失（已確認正常 HTML，len={len(body)}）"
+            )
+            return {"added": [], "attempted": attempted, "checkout": {}}
+
         r = sess.post(
             f"{BASE_URL}/account/login",
             data={
@@ -714,45 +792,46 @@ def _auto_buy_sequential(non_app: list, purchased: dict, attempts: dict) -> dict
 
 def _auto_buy_parallel(non_app: list, purchased: dict, attempts: dict) -> dict:
     """
-    Parallel 模式：每個（帳號 × 商品）為獨立 thread，各自登入後立即結帳。
-    最大並發數由 PARALLEL_CHECKOUT_LIMIT 控制（預設 6），避免記憶體爆炸或被網站限流。
+    Parallel 模式：帳號間平行，每帳號登入一次後逐件商品依序結帳。
+    並行單位為「帳號」，同帳號內商品排隊，避免同帳號購物車互撞或重複登入。
     """
-    tasks = []
+    account_tasks = []
     for email, pwd in FUNBOX_ACCOUNTS:
-        sorted_products = _sort_products_for_account(non_app, purchased, attempts, email)
-        for p in sorted_products:
-            tasks.append((email, pwd, p))
+        sorted_products = _sort_products_for_account(
+            non_app, purchased, attempts, email
+        )
+        if sorted_products:
+            account_tasks.append((email, pwd, sorted_products))
 
-    if not tasks:
+    if not account_tasks:
         log.info("平行模式：無待執行任務")
         return {}
 
+    n_workers = min(PARALLEL_CHECKOUT_LIMIT, len(account_tasks))
     log.info(
-        f"平行模式：{len(tasks)} 個任務（{len(FUNBOX_ACCOUNTS)} 帳號 × {len(non_app)} 件商品），"
-        f"並發上限 {PARALLEL_CHECKOUT_LIMIT}"
+        f"平行模式：{len(account_tasks)} 個帳號，並發上限 {n_workers}"
     )
 
     results: dict = {}
 
-    with ThreadPoolExecutor(max_workers=PARALLEL_CHECKOUT_LIMIT) as executor:
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {
-            executor.submit(_checkout_for_account, email, pwd, [p]): (email, p["href"])
-            for email, pwd, p in tasks
+            executor.submit(
+                _checkout_for_account, email, pwd, products
+            ): email
+            for email, pwd, products in account_tasks
         }
         for future in as_completed(futures):
-            email, href = futures[future]
+            email = futures[future]
             try:
-                r = future.result()
-                if email not in results:
-                    results[email] = {"added": [], "attempted": [], "checkout": {}}
-                results[email]["added"].extend(r.get("added", []))
-                results[email]["attempted"].extend(r.get("attempted", []))
-                results[email]["checkout"].update(r.get("checkout", {}))
+                results[email] = future.result()
             except Exception as e:
                 log.error(f"[{email}] 執行緒例外：{e}")
-                if email not in results:
-                    results[email] = {"added": [], "attempted": [], "checkout": {}}
-                results[email]["checkout"][href] = "failed"
+                results[email] = {
+                    "added": [],
+                    "attempted": [],
+                    "checkout": {},
+                }
 
     return results
 
