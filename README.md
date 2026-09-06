@@ -303,9 +303,10 @@ python 1999_monitor/refresh_session.py
         │     ├─ POST /cart/add（加入 1 件，抽抽包/隨機強化組加 3 件）
         │     └─ Playwright 開啟 /cart → 立即結帳
         │
-        └─ [parallel 模式，預設] 每個（帳號 × 商品）各自獨立 thread，各自登入後立即結帳
+        └─ [parallel 模式，預設] 帳號間平行，每帳號登入一次後逐件商品依序結帳
+              ├─ 並行單位為「帳號」，同帳號內商品排隊（避免購物車互撞或重複登入）
               ├─ 商品排序同 sequential（購買次數少優先）
-              ├─ 最大並發數：PARALLEL_CHECKOUT_LIMIT（預設 6，避免記憶體或被限流）
+              ├─ 帳號並發上限：PARALLEL_CHECKOUT_LIMIT（預設 6）
               │
               └─ Playwright 結帳（兩個模式共用）
                     ├─ 1. page.goto /carts/{token}（wait_until=domcontentloaded, timeout=30s）
@@ -346,6 +347,20 @@ python 1999_monitor/refresh_session.py
 
 > 舊版 `purchased` 格式（`{href: [帳號清單]}`）在讀取時自動遷移為新格式。
 
+### 登入失敗分類
+
+GET 登入頁的 response 會在解析 CSRF 前逐層驗證，確保錯誤原因可追溯：
+
+| 分類 | 觸發條件 | 行為 |
+|---|---|---|
+| `login_gate_blocked` | 熔斷器冷卻中 | 直接跳過，不發 GET 請求 |
+| `login_page_read_timeout` | GET 登入頁讀取逾時（>12s） | 跳過，不重試 |
+| `rate_limited` | HTTP 429/503，或 body 含「retry later」/「請稍後再試」等關鍵字 | 啟動全域熔斷器冷卻（30~300s） |
+| `login_http_XXX` | HTTP 非 200（非上述限流碼） | 跳過 |
+| `login_content_type_invalid` | Content-Type 非 HTML | 跳過（通常為 CDN 錯誤頁） |
+| `login_redirected` | 最終 URL 不含 `/account/login` | 跳過（WAF 或非預期跳轉） |
+| `csrf_missing_on_valid_html` | 以上全通過但找不到 token | 才是真正的 CSRF selector 失效，需調查網站改版 |
+
 ### 結帳狀態判斷
 
 程式在結帳輪詢期間同時偵測 URL 跳轉與頁面文字，能識別以下六種結果：
@@ -366,6 +381,7 @@ python 1999_monitor/refresh_session.py
 - **指數退避重試**（最多 4 次）：connect timeout 8 秒；1st retry ~1s、2nd ~2s、3rd ~4s + jitter
 - **429 / 5xx 暫時錯誤**：讀取 `Retry-After` header 等待後重試
 - **連續失敗快速放棄**：若連續 3 輪 `fetch_products()` 全部失敗，程式提早 `break` 結束本次 run，交由下次排程取得新 runner（避免整個 run 困在網路有問題的 VM 上）
+- **登入限流熔斷器**：任一帳號遇到 429/503 啟動全域冷卻（30~300 秒，依 `Retry-After` header 決定），冷卻期間其他帳號的待登入 thread 立即暫停，不再擴大請求量
 
 ### Email 通知格式
 
