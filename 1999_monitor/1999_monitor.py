@@ -66,6 +66,7 @@ NOTIFY_KEYWORD = os.environ.get("PRODUCT_NAME", _extract_keyword(SEARCH_URL))
 NOT_NOTIFY_KEYWORDS: list[str] = [
     "BX-43",
     "BX-25",
+    "BX-11",
 ]
 
 
