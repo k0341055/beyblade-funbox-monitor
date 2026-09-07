@@ -69,6 +69,27 @@ NOT_NOTIFY_KEYWORDS: list[str] = [
     "BX-11",
 ]
 
+# ─────────────────────────────────────────────
+# 登入限流 / CF 偵測常數
+# ─────────────────────────────────────────────
+
+_CF_TITLE_WORDS = (
+    "just a moment",
+    "checking your browser",
+    "please wait",
+    "attention required",
+)
+
+_RETRY_LATER_WORDS = (
+    "retry later",
+    "too many requests",
+    "請稍後再試",
+    "操作過於頻繁",
+)
+
+_LOGIN_FAIL_MAX: int = 2
+_login_fail_count: int = 0
+
 
 # ─────────────────────────────────────────────
 # 只通知、不自動下單
@@ -803,6 +824,36 @@ async def _login_1999(page) -> bool:
             _jitter(800)
         )
 
+        try:
+            _title = (await page.title()).lower()
+            if any(
+                w in _title
+                for w in _CF_TITLE_WORDS
+            ):
+                log.error(
+                    "[1999] 登入頁偵測到 CF 驗證挑戰，"
+                    f"title='{_title}'，跳過登入"
+                )
+                return False
+
+            _body = (
+                await page.inner_text("body")
+            ).lower()
+            if any(
+                w in _body
+                for w in _RETRY_LATER_WORDS
+            ):
+                log.error(
+                    "[1999] 登入頁偵測到限流訊息，"
+                    "跳過登入"
+                )
+                return False
+
+        except Exception as _pe:
+            log.warning(
+                f"[1999] 登入頁狀態檢查失敗（忽略）：{_pe}"
+            )
+
         await page.fill(
             "input[name='txtLogin']",
             ACCOUNT_1999
@@ -861,6 +912,7 @@ async def _ensure_1999_login(page) -> bool:
     未登入：
         呼叫 _login_1999()。
     """
+    global _login_fail_count
 
     try:
         await page.goto(
@@ -875,9 +927,10 @@ async def _ensure_1999_login(page) -> bool:
                 "1999 尚未登入，現在才登入..."
             )
 
-            return await _login_1999(
-                page
-            )
+            result = await _login_1999(page)
+            if not result:
+                _login_fail_count += 1
+            return result
 
         log.info(
             "偵測到需要自動下單商品，"
@@ -892,9 +945,10 @@ async def _ensure_1999_login(page) -> bool:
             "嘗試直接登入..."
         )
 
-        return await _login_1999(
-            page
-        )
+        result = await _login_1999(page)
+        if not result:
+            _login_fail_count += 1
+        return result
 
 
 async def _handle_amazon_auth(page) -> str:
@@ -1565,7 +1619,18 @@ async def check_once(
                     # → 現在才檢查 / 登入 1999
                     # ═════════════════════════════════════
 
-                    if not await _ensure_1999_login(
+                    if _login_fail_count >= _LOGIN_FAIL_MAX:
+                        log.error(
+                            f"登入失敗次數已達 {_LOGIN_FAIL_MAX} 次，"
+                            "本輪略過自動下單（限流熔斷）"
+                        )
+
+                        for p in to_checkout:
+                            checkout_results[
+                                p["href"]
+                            ] = "login_failed"
+
+                    elif not await _ensure_1999_login(
                         page
                     ):
                         log.error(

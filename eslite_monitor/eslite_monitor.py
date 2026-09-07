@@ -91,6 +91,20 @@ class EsliteMonitorBase(ABC):
         "Chrome/124.0.0.0 Safari/537.36"
     )
 
+    _CF_TITLE_WORDS = (
+        "just a moment",
+        "checking your browser",
+        "please wait",
+        "attention required",
+    )
+
+    _RETRY_LATER_WORDS = (
+        "retry later",
+        "too many requests",
+        "請稍後再試",
+        "操作過於頻繁",
+    )
+
     def __init__(self):
 
         self.TW_TZ = timezone(
@@ -832,6 +846,38 @@ class EsliteMonitorBase(ABC):
             page.wait_for_timeout(
                 2000
             )
+
+            try:
+                _title = page.title().lower()
+                if any(
+                    w in _title
+                    for w in self._CF_TITLE_WORDS
+                ):
+                    log.error(
+                        "登入頁偵測到 CF 驗證挑戰，"
+                        f"title='{_title}'，跳過登入"
+                    )
+                    self._record_login_failure()
+                    return False
+
+                _body = page.inner_text(
+                    "body"
+                ).lower()
+                if any(
+                    w in _body
+                    for w in self._RETRY_LATER_WORDS
+                ):
+                    log.error(
+                        "登入頁偵測到限流訊息，"
+                        "跳過登入"
+                    )
+                    self._record_login_failure()
+                    return False
+
+            except Exception as _pe:
+                log.warning(
+                    f"登入頁狀態檢查失敗（忽略）：{_pe}"
+                )
 
             page.get_by_role(
                 "textbox",

@@ -202,6 +202,14 @@ beyblade-funbox-monitor/
   │
   └─ BUY_KEYWORDS 符合 + 未曾下單 → Playwright 自動下單
         │
+        ├─ 登入失敗熔斷器：本次 run 內登入已失敗 ≥ 2 次 → 直接略過，不嘗試登入
+        │
+        ├─ _ensure_1999_login()（延遲登入，僅在有需下單商品時觸發）
+        │     ├─ 進入 /login 後等待，先檢查頁面狀態：
+        │     │     ├─ page.title() 含 CF 關鍵字（"just a moment" 等）→ CF 驗證挑戰，直接返回 False
+        │     │     └─ page.inner_text("body") 含限流關鍵字（"retry later"/"請稍後再試" 等）→ 限流，直接返回 False
+        │     └─ 登入失敗 → _login_fail_count +1（全域計數，跨輪累積）
+        │
         ├─ ① 批次加入購物車（wait_until=load，速度最佳化）
         │     對每件商品：商品頁 → 封鎖 Zenlink → 點擊「カートに入れる」
         │
@@ -533,7 +541,10 @@ OOP 拆分後，展覽監控不再呼叫個別商品 API，每輪節省約 3 秒
   │                 │     PARALLEL_SESSION_MODE=storage
   │                 │     └─ 預先取得 session state → 直接注入 cookies
   │                 │
-  │                 ├─ 登入失敗
+  │                 ├─ 登入失敗（Playwright 模式）
+  │                 │     ├─ 進入 /login 後等待 2 秒，先檢查頁面狀態：
+  │                 │     │     ├─ page.title() 含 CF 關鍵字（"just a moment" 等）→ CF 驗證挑戰，直接返回 False
+  │                 │     │     └─ page.inner_text("body") 含限流關鍵字（"retry later"/"請稍後再試" 等）→ 限流，直接返回 False
   │                 │     ├─ 失敗計數 +1（thread-safe）
   │                 │     ├─ 發送登入失敗警告（每 run 最多一封）
   │                 │     └─ 失敗計數 ≥ 2 → 後續 worker 全部跳過登入
