@@ -44,7 +44,7 @@ flowchart TD
     COOL2 -->|新商品 / 到期| MAIL2["Gmail 上架通知 → 全體收件人（立即）\nGmail 結帳結果 → 各下單帳號（結帳後）"]
     NOCD --> MAIL3["Gmail → 全體收件人\n含一鍵結帳連結"]
 
-    COOL2 -->|同輪觸發| BUY["多帳號下單\nCHECKOUT_MODE 決定策略\nsequential / parallel"]
+    COOL2 -->|同輪觸發| BUY["多帳號下單\nThread 4 全域庫存監控\n+ Thread 1~3 各帳號平行下單"]
     NOCD -->|同輪觸發\nguid 不在記憶體且未下單| ECART["建立獨立結帳 context（含 session）\n→ 登入 → 清空購物車\n→ 加入購物車"]
     NOCD -->|所有 guid 已在 order_state| SKIP["跳過下單\n不建立 session context\n不登入（避免異地衝突）"]
 
@@ -310,27 +310,38 @@ python 1999_monitor/refresh_session.py
   │
   └─ BUY_KEYWORDS 符合（FUNBOX_EMAIL 帳號有設定即自動下單，無獨立開關）
         ├─ 上架通知立即寄出（不等待結帳結果）
-        └─ 依 CHECKOUT_MODE 決定策略（YML 參數控制）
-        │
-        ├─ [sequential 模式] 帳號間平行，每帳號登入一次後逐件商品依序結帳
-        │     ├─ 商品排序：購買次數少的優先（自然輪替）
-        │     ├─ POST /cart/clear.js（清空購物車）
-        │     ├─ POST /cart/add（加入 1 件，抽抽包/隨機強化組加 3 件）
-        │     └─ Playwright 開啟 /cart → 立即結帳
-        │
-        └─ [parallel 模式，預設] 帳號間平行，每帳號登入一次後逐件商品依序結帳
-              ├─ 並行單位為「帳號」，同帳號內商品排隊（避免購物車互撞或重複登入）
-              ├─ 商品排序同 sequential（購買次數少優先）
-              ├─ 帳號並發上限：PARALLEL_CHECKOUT_LIMIT（預設 6）
-              │
-              └─ Playwright 結帳（兩個模式共用）
-                    ├─ 1. page.goto /carts/{token}（wait_until=domcontentloaded, timeout=30s）
-                    ├─ 2. 點擊「立即結帳」連結，進入結帳頁
-                    ├─ 3. 取消紅利點數折抵（spinbutton 填 0 → 確認，無紅利則自動跳過）
-                    ├─ 4. 選擇配送方式：7-11 貨到付款（優先）→ 7-11 取貨(先付款)（次選）
-                    ├─ 5. 點擊「立即結帳」按鈕，送出訂單
-                    ├─ 6. URL 快速判斷：show_failed → payment_failed｜3DS → 3ds_pending｜order/thank → success
-                    └─ 7. 前往會員中心，比對最新訂單商品 href 確認成功
+        └─ 四個 Thread 平行啟動：
+
+              ── Thread 4：全域庫存監控（不登入 Funbox）──
+
+              每 STOCK_MONITOR_INTERVAL 秒重新呼叫 /products.json API
+              ├─ 若任一監控商品庫存 < STOCK_THRESHOLD
+              │     → 設定 shared_checkout_event，通知所有帳號 thread 立即結帳
+              │     → Thread 4 結束
+              └─ 若 API 出現新 BUY_KEYWORDS 商品
+                    → 加入 new_products_found 清單，供各帳號 thread 補加購物車
+
+              ── Thread 1~3：各帳號積累式購物車流程 ──
+
+              1. 登入（一次性）
+              2. 清空購物車（只清一次）
+              3. 一次性將全部 BUY_KEYWORDS 商品加入購物車
+                 ├─ 商品排序：購買次數少的優先（自然輪替）
+                 └─ POST /cart/add（一般款 1 件，抽抽包/隨機強化組 3 件）
+              4. 等待 shared_checkout_event（由 Thread 4 觸發，上限 STOCK_MONITOR_TIMEOUT 秒）
+                 ├─ 每 STOCK_MONITOR_INTERVAL 秒檢查 new_products_found
+                 │     → 若有新商品 → POST /cart/add 補加入自己的購物車
+                 └─ 超時仍未觸發 → 強制結帳
+              5. Playwright 整車結帳（一次結帳購物車全部商品，節省運費）
+                 ├─ 1. page.goto /carts/{token}（wait_until=domcontentloaded, timeout=30s）
+                 ├─ 2. 點擊「立即結帳」按鈕（#checkout-button）進入結帳頁
+                 │     ├─ 若跳至 orders/TOKEN?show_failed → payment_failed（直接返回）
+                 │     └─ 若跳至 orders/TOKEN 無 show_failed → success（直接返回）
+                 ├─ 3. 取消紅利點數折抵（spinbutton 填 0 → 確認 → 等 2 秒 AJAX 結算）
+                 ├─ 4. 選擇配送方式：7-11 貨到付款（優先）→ 7-11 取貨(先付款)（次選）
+                 ├─ 5. 清除 noty 通知遮罩後點擊「立即結帳」送出訂單
+                 ├─ 6. URL 快速判斷：show_failed → payment_failed｜3DS → 3ds_pending｜order/thank → success
+                 └─ 7. 前往會員中心確認最新訂單
 ```
 
 ### 購買數量規則
@@ -340,7 +351,7 @@ python 1999_monitor/refresh_session.py
 | 標題含「隨機強化組」或「抽抽包」 | 3 件 |
 | 其他（一般陀螺） | 1 件 |
 
-> 每件商品獨立清空購物車後再加購，避免批次加購時售完商品卡住整筆訂單。
+> **Thread 4 全域監控策略**：獨立一個不登入 Funbox 的監控 thread（Thread 4）純輪詢庫存 API；三個帳號 thread（Thread 1~3）各自登入並將商品加入購物車後，共同等待 Thread 4 發出的觸發信號，收到信號後同步整車結帳，節省運費並確保第一時間搶購。
 
 ### 商品排序與購買輪替
 
@@ -791,11 +802,13 @@ ESLITE_EVENT_URL={設定於 GitHub Variable ESLITE_EVENT_URL}
 |---|---|---|
 | `SEARCH_URL` | GitHub Variable `FUNBOX_SEARCH_URL` | 監控目標（可改為任意 Cyberbiz 集合 URL） |
 | `CHECK_ROUNDS` | `1`（本機預設） | 執行輪數（GitHub Actions 設為 60） |
-| `CHECKOUT_MODE` | YML input，預設 `parallel` | `parallel`：帳號×商品全平行（預設）；`sequential`：帳號平行、每帳號商品逐件 |
-| `PARALLEL_CHECKOUT_LIMIT` | YML input，預設 `6` | parallel 模式最大並發 thread 數（可於觸發 workflow 時調整） |
+| `PARALLEL_CHECKOUT_LIMIT` | YML input，預設 `6` | 帳號並發 thread 上限（可於觸發 workflow 時調整） |
 | `PRIORITY_KEYWORDS` | 空（選填 env） | 逗號分隔關鍵字，符合商品永遠排最前面（不管購買次數） |
 | `MAX_BUY_PRODUCTS` | `0`（無限制） | 限制本次最多購買幾件（0 = 不限，測試用） |
 | `TEST_MODE` | `0` | 設為 `1` 時 email 主旨加【測試】標注 |
+| `STOCK_THRESHOLD` | `50` | Thread 4 庫存監控：任一商品庫存低於此值即觸發結帳信號 |
+| `STOCK_MONITOR_INTERVAL` | `5` | Thread 4 全域庫存監控的輪詢間隔（秒） |
+| `STOCK_MONITOR_TIMEOUT` | `300` | 帳號 thread 最長等待時間（秒），超時後強制結帳，防止無限等待 |
 
 #### 誠品
 

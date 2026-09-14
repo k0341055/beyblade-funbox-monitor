@@ -1,8 +1,8 @@
 """
 shop.funbox.com.tw 商品偵測器
 - 偵測：Cyberbiz /products.json API，每輪 < 1 秒
-- 下單：多帳號平行執行，每件商品獨立清空購物車後立即結帳
-- 模式：sequential（帳號平行、商品逐件）或 parallel（帳號×商品全平行）
+- 下單：多帳號平行執行（Thread 1/2/3），積累式購物車 + 一次性整車結帳
+- 監控：Thread 4（不登入 Funbox）純監控庫存，觸發後同步通知所有帳號結帳
 """
 
 import json
@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -120,13 +121,14 @@ SKIP_KEYWORDS: list[str] = [
 # ── 自動下單目標商品關鍵字（白名單，依志願順序）────────
 # 商品名稱含以下任一關鍵字 → 才執行自動下單
 BUY_KEYWORDS: list[str] = [
+    "BX-53", "BX-52",
     "BX-09",
     "UX-17", "UX-21", "UX-15", "UX-04",
     "CX-00 新世紀福音戰士",
     "BX-00 蒼龍神劍",
     "BX-46",
     "CX-16", "CX-04",
-    "UX-03", "UX-16",
+    "UX-03", "CX-00 迪", "UX-16",
     "CX-11",
     "UX-11", "UX-20", "UX-10",
     "CX-07",
@@ -152,6 +154,13 @@ PRIORITY_KEYWORDS: list[str] = (
 # 'parallel'  ：每個（帳號 × 商品）各自獨立 thread 登入後立即結帳（最大化速度）
 CHECKOUT_MODE = os.environ.get("CHECKOUT_MODE", "sequential").strip().lower()
 PARALLEL_CHECKOUT_LIMIT = int(os.environ.get("PARALLEL_CHECKOUT_LIMIT", "6"))
+
+# ── 積累式購物車 + 庫存監控 ─────────────────────────────────
+# 所有 BUY_KEYWORDS 商品一次性加入購物車；per-account 監控 thread
+# 偵測到任一商品庫存 < STOCK_THRESHOLD 時立即觸發整車結帳，節省運費
+STOCK_THRESHOLD       = int(os.environ.get("STOCK_THRESHOLD",        "50"))   # 庫存低於此值觸發結帳
+STOCK_MONITOR_INTERVAL = int(os.environ.get("STOCK_MONITOR_INTERVAL", "5"))   # 庫存偵測間隔（秒）
+STOCK_MONITOR_TIMEOUT  = int(os.environ.get("STOCK_MONITOR_TIMEOUT",  "300")) # 最長等待時間（秒）
 
 # ── 登入限流熔斷器（跨 thread 共用）─────────────────────────────
 _login_gate_lock = threading.Lock()
@@ -378,13 +387,85 @@ def get_target_qty(p: dict) -> int:
 
 
 # ─────────────────────────────────────────────
-# 登入 + 逐件加購結帳（requests + Playwright）
+# Thread 4：全域庫存監控（不登入 Funbox）
 # ─────────────────────────────────────────────
 
 
-def _checkout_for_account(email: str, password: str, products: list) -> dict:
+def _global_stock_monitor(
+    stop_event:         threading.Event,
+    checkout_event:     threading.Event,
+    watch_hrefs:        list,   # 監控中的 href 清單（可動態追加新商品）
+    trigger_info:       list,   # 輸出：觸發資訊 {href, stock, title}
+    new_products_found: list,   # 輸出：偵測到的新商品，通知帳號 thread 補加購物車
+) -> None:
+    """Thread 4：全域庫存監控，不登入 Funbox，所有帳號共用。"""
+    log.info(
+        f"[global-monitor] 啟動 | {len(watch_hrefs)} 件 "
+        f"| 閾值={STOCK_THRESHOLD} | 間隔={STOCK_MONITOR_INTERVAL}s"
+    )
+
+    while not stop_event.is_set() and not checkout_event.is_set():
+        try:
+            fresh_products = fetch_products()
+        except Exception as e:
+            log.warning(f"[global-monitor] API 抓取失敗：{e}")
+            stop_event.wait(STOCK_MONITOR_INTERVAL)
+            continue
+
+        stock_map = {p["href"]: p for p in fresh_products}
+
+        # 庫存告急檢查
+        for href in list(watch_hrefs):
+            p_data  = stock_map.get(href)
+            current = p_data["inventory"] if p_data else 0
+            if current < STOCK_THRESHOLD:
+                title = p_data["title"] if p_data else href
+                log.warning(
+                    f"[global-monitor] ⚡ 庫存告急：{title} "
+                    f"庫存={current} < {STOCK_THRESHOLD} → 觸發結帳"
+                )
+                trigger_info.append({"href": href, "stock": current, "title": title})
+                checkout_event.set()
+                log.info("[global-monitor] 全域庫存監控結束（已觸發結帳）")
+                return
+
+        # 新商品偵測：符合 BUY_KEYWORDS 但尚未在監控清單中 → 放入 new_products_found
+        known_hrefs = set(watch_hrefs)
+        for p in fresh_products:
+            if (p["href"] not in known_hrefs
+                    and any(kw.upper() in p["title"].upper() for kw in BUY_KEYWORDS)):
+                log.info(
+                    f"[global-monitor] 新商品偵測：{p['title']} "
+                    f"| 庫存:{p['inventory']}"
+                )
+                new_products_found.append(p)
+                watch_hrefs.append(p["href"])
+                known_hrefs.add(p["href"])
+
+        stop_event.wait(STOCK_MONITOR_INTERVAL)
+
+    log.info("[global-monitor] 全域庫存監控結束")
+
+
+# ─────────────────────────────────────────────
+# 登入 + 積累式購物車 + 一次性結帳
+# ─────────────────────────────────────────────
+
+
+def _checkout_for_account(
+    email: str,
+    password: str,
+    products: list,
+    shared_checkout_event: threading.Event,
+    shared_stop_event:     threading.Event,
+    trigger_info:          list,
+    new_products_found:    list,
+) -> dict:
     """
-    登入一次 → 逐件商品：清空購物車 → 加一件 → 立即結帳。
+    積累式購物車策略：
+      登入 → 清空購物車一次 → 將所有商品加入購物車 →
+      等待全域庫存監控（Thread 4）觸發 shared_checkout_event →
+      觸發後以 Playwright 整車結帳。
     回傳 {"added": [...hrefs], "attempted": [...hrefs], "checkout": {href: status}}。
     """
     import time as _time
@@ -459,24 +540,23 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
         log.error(f"[{email}] 登入例外：{e}")
         return {"added": [], "attempted": attempted, "checkout": {}}
 
-    added = []
-    checkout_statuses = {}
+    # ── 清空購物車（只清一次，後續不逐件清空）──
+    t_clear = _time.perf_counter()
+    try:
+        r_clear = sess.post(f"{BASE_URL}/cart/clear.js", timeout=10)
+        log.info(
+            f"[{email}] ⏱ 購物車已清空"
+            f"（{_time.perf_counter()-t_clear:.2f}s，HTTP {r_clear.status_code}）"
+        )
+    except Exception as e:
+        log.warning(f"[{email}] 購物車清空失敗：{e}")
 
+    # ── 一次性將所有商品加入購物車（不逐件清空）──
+    cart_items: list = []   # 成功加入購物車的商品（共用給監控 thread）
+    log.info(f"[{email}] 開始加入 {len(products)} 件商品至購物車…")
     for p in products:
-        t_product = _time.perf_counter()
         vid = p["variant_id"]
         target_qty = get_target_qty(p)
-        log.info(f"[{email}] ── 開始處理：{p['title']} ──")
-
-        # ── 清空購物車 ──
-        t1 = _time.perf_counter()
-        try:
-            r_clear = sess.post(f"{BASE_URL}/cart/clear.js", timeout=10)
-            log.info(f"[{email}] ⏱ 購物車已清空（{_time.perf_counter()-t1:.2f}s，HTTP {r_clear.status_code}）")
-        except Exception as e:
-            log.warning(f"[{email}] 購物車清空失敗：{e}")
-
-        # ── 加入購物車 ──
         t2 = _time.perf_counter()
         r2 = sess.post(
             f"{BASE_URL}/cart/add",
@@ -485,9 +565,15 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
             timeout=30,
         )
         if r2.status_code == 200:
-            log.info(f"[{email}] ⏱ 加入購物車：{p['title']} x{target_qty}（{_time.perf_counter()-t2:.2f}s）")
+            log.info(
+                f"[{email}] ⏱ 加入購物車：{p['title']} x{target_qty}"
+                f"（{_time.perf_counter()-t2:.2f}s）"
+            )
+            cart_items.append(p)
         elif target_qty > 1:
-            log.warning(f"[{email}] 加購 x{target_qty} 失敗：{p['title']} | HTTP {r2.status_code}")
+            log.warning(
+                f"[{email}] 加購 x{target_qty} 失敗（HTTP {r2.status_code}），降量重試 x1"
+            )
             r3 = sess.post(
                 f"{BASE_URL}/cart/add",
                 data={"id": vid, "quantity": 1},
@@ -495,49 +581,118 @@ def _checkout_for_account(email: str, password: str, products: list) -> dict:
                 timeout=30,
             )
             if r3.status_code == 200:
-                log.info(f"[{email}] ⏱ 加入購物車：{p['title']} x1（降量重試，{_time.perf_counter()-t2:.2f}s）")
+                log.info(
+                    f"[{email}] ⏱ 加入購物車：{p['title']} x1（降量重試，"
+                    f"{_time.perf_counter()-t2:.2f}s）"
+                )
+                cart_items.append(p)
             else:
                 log.error(f"[{email}] 無法加入購物車：{p['title']} (HTTP {r3.status_code})")
-                checkout_statuses[p["href"]] = "failed"
-                continue
         else:
             log.error(f"[{email}] 無法加入購物車：{p['title']} (HTTP {r2.status_code})")
-            checkout_statuses[p["href"]] = "failed"
-            continue
 
-        added.append(p["href"])
+    if not cart_items:
+        log.error(f"[{email}] 所有商品均無法加入購物車，跳過")
+        return {
+            "added": [],
+            "attempted": attempted,
+            "checkout": {p["href"]: "failed" for p in products},
+        }
 
-        # ── 取得購物車 URL ──
-        t3 = _time.perf_counter()
-        try:
-            r_cart = sess.get(f"{BASE_URL}/cart", allow_redirects=True, timeout=30)
-            cart_url = r_cart.url
-            if "/carts/" not in cart_url:
-                log.error(f"[{email}] 購物車頁面異常（{cart_url}）")
-                checkout_statuses[p["href"]] = "failed"
-                continue
-            log.info(f"[{email}] ⏱ 購物車 URL 取得（{_time.perf_counter()-t3:.2f}s）：{cart_url}")
-        except Exception as e:
-            log.error(f"[{email}] 取得購物車 URL 例外：{e}")
-            checkout_statuses[p["href"]] = "failed"
-            continue
-
-        cookies_list = [
-            {"name": c.name, "value": c.value,
-             "domain": c.domain or "shop.funbox.com.tw", "path": c.path or "/"}
-            for c in sess.cookies
-        ]
-
-        # ── Playwright 結帳 ──
-        t4 = _time.perf_counter()
-        status = _playwright_checkout(email, cart_url, cookies_list, p["href"])
-        checkout_statuses[p["href"]] = status
+    # ── 取得購物車 URL ──
+    t3 = _time.perf_counter()
+    try:
+        r_cart = sess.get(f"{BASE_URL}/cart", allow_redirects=True, timeout=30)
+        cart_url = r_cart.url
+        if "/carts/" not in cart_url:
+            log.error(f"[{email}] 購物車頁面異常（{cart_url}）")
+            return {
+                "added": [p["href"] for p in cart_items],
+                "attempted": attempted,
+                "checkout": {p["href"]: "failed" for p in cart_items},
+            }
         log.info(
-            f"[{email}] ⏱ 結帳完成：{p['title']} → {status}"
-            f"（Playwright {_time.perf_counter()-t4:.2f}s｜本件合計 {_time.perf_counter()-t_product:.2f}s）"
+            f"[{email}] ⏱ 購物車 URL（{_time.perf_counter()-t3:.2f}s）：{cart_url}"
+        )
+    except Exception as e:
+        log.error(f"[{email}] 取得購物車 URL 例外：{e}")
+        return {
+            "added": [p["href"] for p in cart_items],
+            "attempted": attempted,
+            "checkout": {p["href"]: "failed" for p in cart_items},
+        }
+
+    # ── 等待全域庫存監控（Thread 4）觸發或超時後強制結帳 ──
+    log.info(f"[{email}] 等待全域庫存監控觸發（最多 {STOCK_MONITOR_TIMEOUT}s）…")
+    deadline  = _time.monotonic() + STOCK_MONITOR_TIMEOUT
+    triggered = False
+    while _time.monotonic() < deadline and not shared_stop_event.is_set():
+        remaining = deadline - _time.monotonic()
+        triggered = shared_checkout_event.wait(timeout=min(STOCK_MONITOR_INTERVAL, remaining))
+        if triggered:
+            break
+        # 補加 Thread 4 偵測到的新商品至本帳號購物車
+        cart_hrefs_set = {p["href"] for p in cart_items}
+        for new_p in list(new_products_found):
+            if new_p["href"] not in cart_hrefs_set:
+                log.info(
+                    f"[{email}] 新商品補加：{new_p['title']} | 庫存:{new_p['inventory']}"
+                )
+                target_qty = get_target_qty(new_p)
+                try:
+                    r_new = sess.post(
+                        f"{BASE_URL}/cart/add",
+                        data={"id": new_p["variant_id"], "quantity": target_qty},
+                        headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
+                        timeout=30,
+                    )
+                    if r_new.status_code == 200:
+                        cart_items.append(new_p)
+                        cart_hrefs_set.add(new_p["href"])
+                        log.info(
+                            f"[{email}] ✓ 新商品補加成功：{new_p['title']} x{target_qty}"
+                        )
+                    else:
+                        log.warning(
+                            f"[{email}] 新商品補加失敗：{new_p['title']} HTTP {r_new.status_code}"
+                        )
+                except Exception as exc:
+                    log.warning(f"[{email}] 新商品補加例外：{new_p['title']} | {exc}")
+
+    if triggered and trigger_info:
+        t = trigger_info[0]
+        log.info(f"[{email}] 觸發：{t['title']} 庫存={t['stock']}")
+    elif triggered:
+        log.info(f"[{email}] 全域庫存監控觸發，開始結帳")
+    else:
+        log.warning(
+            f"[{email}] 等待超時（{STOCK_MONITOR_TIMEOUT}s），強制結帳"
+            f"（共 {len(cart_items)} 件）"
         )
 
-    return {"added": added, "attempted": attempted, "checkout": checkout_statuses}
+    # ── Playwright 整車結帳（一次結帳購物車所有商品）──
+    cookies_list = [
+        {"name": c.name, "value": c.value,
+         "domain": c.domain or "shop.funbox.com.tw", "path": c.path or "/"}
+        for c in sess.cookies
+    ]
+    t4 = _time.perf_counter()
+    status = _playwright_checkout(
+        email, cart_url, cookies_list,
+        product_href="",
+        cart_hrefs=[p["href"] for p in cart_items],
+    )
+    log.info(
+        f"[{email}] ⏱ 整車結帳完成：{status}"
+        f"（{len(cart_items)} 件 | Playwright {_time.perf_counter()-t4:.2f}s）"
+    )
+
+    checkout_statuses = {p["href"]: status for p in cart_items}
+    return {
+        "added": [p["href"] for p in cart_items],
+        "attempted": attempted,
+        "checkout": checkout_statuses,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -550,6 +705,7 @@ def _playwright_checkout(
     cart_url: str,
     cookies_list: list,
     product_href: str = "",
+    cart_hrefs: list = None,
 ) -> str:
     """
     Playwright 結帳流程：
@@ -585,26 +741,51 @@ def _playwright_checkout(
                 br.close()
                 return "cart"
 
-            # ── 2. 點「立即結帳」連結，進入結帳頁 ───────────────────────
+            # ── 2. 點「立即結帳」按鈕，進入結帳頁 ───────────────────────
+            # 購物車頁的結帳按鈕：<button id="checkout-button">
             t2 = _time.perf_counter()
             try:
-                page.get_by_role("link", name="立即結帳").click()
+                checkout_btn = page.locator("#checkout-button").first
+                if checkout_btn.count() == 0:
+                    checkout_btn = page.get_by_role("button", name=re.compile(r"立即結帳")).first
+                checkout_btn.click(timeout=15000)
+                # 等 noty 通知有時間出現後立即清除（避免遮罩擋住結帳表單）
+                page.wait_for_timeout(1000)
+                try:
+                    page.evaluate(
+                        "document.querySelectorAll"
+                        "('#noty_loading_mask,.noty_modal,.noty_container')"
+                        ".forEach(el => el.remove())"
+                    )
+                except Exception:
+                    pass
                 page.wait_for_load_state("domcontentloaded", timeout=15000)
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(2000)  # 等結帳表單 AJAX 載入完成
                 log.info(f"[{email}] ⏱ 進入結帳頁（{_time.perf_counter()-t2:.2f}s）：{page.url}")
             except Exception as e:
-                log.error(f"[{email}] 找不到「立即結帳」連結：{e}")
+                log.error(f"[{email}] 找不到「立即結帳」按鈕：{e}")
                 br.close()
                 return "cart"
+
+            # 步驟2後即到達結果頁（部分帳號跳過結帳表單直接跳轉）
+            post2_url = page.url
+            if "show_failed" in post2_url:
+                log.warning(f"[{email}] 步驟2後即付款失敗：{post2_url}")
+                br.close()
+                return "payment_failed"
+            if "orders/" in post2_url and "show_failed" not in post2_url:
+                log.info(f"[{email}] ✅ 步驟2後即結帳成功：{post2_url}")
+                br.close()
+                return "success"
 
             # ── 3. 取消紅利點數折抵（有點數才顯示，無則跳過）────────────
             try:
                 page.get_by_role(
                     "spinbutton",
                     name=re.compile(r"請輸入會員紅利折抵點數"),
-                ).first.fill("0")
+                ).first.fill("0", timeout=3000)  # 無紅利時快速跳過，不白等 30s
                 page.get_by_role("button", name="確認").first.click()
-                page.wait_for_timeout(1000)
+                page.wait_for_timeout(2000)   # 等 AJAX 結算完成，確保 7-11 按鈕可點
                 log.info(f"[{email}] 紅利點數已設為 0")
             except Exception:
                 pass
@@ -619,7 +800,7 @@ def _playwright_checkout(
                 if clicked_shipping:
                     break
                 try:
-                    page.get_by_role("button", name=name_re).first.click()
+                    page.get_by_role("button", name=name_re).first.click(timeout=3000)
                     page.wait_for_timeout(1000)
                     clicked_shipping = True
                     log.info(
@@ -632,6 +813,17 @@ def _playwright_checkout(
                 log.warning(f"[{email}] 找不到 7-11 配送按鈕，繼續結帳")
 
             # ── 5. 點「立即結帳」按鈕，送出訂單 ─────────────────────────
+            # 先等 noty 通知遮罩消失（優惠券驗證錯誤可能觸發，遮住按鈕）
+            try:
+                page.wait_for_selector(".noty_modal", state="hidden", timeout=10000)
+            except Exception:
+                try:
+                    page.evaluate(
+                        "document.querySelectorAll('.noty_modal,.noty_container')"
+                        ".forEach(el => el.remove())"
+                    )
+                except Exception:
+                    pass
             t4 = _time.perf_counter()
             try:
                 page.get_by_role("button", name="立即結帳").click()
@@ -652,7 +844,8 @@ def _playwright_checkout(
                 log.warning(f"[{email}] 3DS 驗證觸發：{url}")
                 br.close()
                 return "3ds_pending"
-            if any(k in url for k in ("order", "thank", "complete", "success")):
+            _url_path = urlparse(url).path
+            if any(k in _url_path for k in ("/orders/", "/thank", "/complete", "/success")):
                 log.info(
                     f"[{email}] ✅ 結帳成功（URL）"
                     f"（{_time.perf_counter()-t0:.1f}s）：{url}"
@@ -674,7 +867,19 @@ def _playwright_checkout(
             except Exception:
                 pass
 
+            # ── 6.5 記錄步驟5後的 URL（輔助診斷）────────────────────────
+            post5_url = page.url
+            log.info(f"[{email}] 送出訂單後 URL：{post5_url}")
+
             # ── 7. 前往會員中心確認最新訂單 ─────────────────────────────
+            try:
+                page.evaluate(
+                    "document.querySelectorAll"
+                    "('#noty_loading_mask,.noty_modal,.noty_container')"
+                    ".forEach(el => el.remove())"
+                )
+            except Exception:
+                pass
             t5 = _time.perf_counter()
             try:
                 page.locator(".dropdown.static > a").first.click()
@@ -686,31 +891,41 @@ def _playwright_checkout(
                     f"（{_time.perf_counter()-t5:.2f}s）：{page.url}"
                 )
 
+                # 取最新訂單第一件商品的 href
+                order_link = page.locator(
+                    ".order_line_items .line_item_title a"
+                ).first
+                href_in_order = order_link.get_attribute("href", timeout=3000) or ""
+                log.info(f"[{email}] 會員中心最新訂單商品 href：{href_in_order!r}")
+
+                # 要比對的 href 候選清單（單品 or 整車）
+                _hrefs_to_check = []
                 if product_href:
-                    # 比對最新訂單是否含有目標商品連結
-                    order_link = page.locator(
-                        ".order_line_items .line_item_title a"
-                    ).first
-                    href_in_order = order_link.get_attribute("href", timeout=3000) or ""
-                    if product_href in href_in_order or href_in_order in product_href:
+                    _hrefs_to_check = [product_href]
+                elif cart_hrefs:
+                    _hrefs_to_check = cart_hrefs
+
+                if _hrefs_to_check:
+                    matched = any(
+                        (ph in href_in_order or href_in_order in ph)
+                        for ph in _hrefs_to_check
+                        if ph
+                    )
+                    if matched:
                         log.info(
-                            f"[{email}] ✅ 結帳成功（會員中心確認）"
-                            f"（{_time.perf_counter()-t0:.1f}s）：{href_in_order}"
+                            f"[{email}] ✅ 結帳成功（會員中心 href 比對）"
+                            f"（{_time.perf_counter()-t0:.1f}s）"
                         )
                         br.close()
                         return "success"
                     log.warning(
                         f"[{email}] 會員中心最新訂單商品不符"
-                        f"（期望 {product_href}，實際 {href_in_order}）"
+                        f"（期望任一 {_hrefs_to_check}，實際 {href_in_order!r}）"
                     )
                 else:
-                    if page.locator(".order_line_items.order_table_body").count() > 0:
-                        log.info(
-                            f"[{email}] ✅ 結帳成功（會員中心）"
-                            f"（{_time.perf_counter()-t0:.1f}s）"
-                        )
-                        br.close()
-                        return "success"
+                    # 無法比對 href → 退回無法確認
+                    log.warning(f"[{email}] 無 href 可比對，跳過會員中心驗證")
+
             except Exception as e:
                 log.warning(f"[{email}] 會員中心驗證失敗：{e}")
 
@@ -758,89 +973,12 @@ def _sort_products_for_account(products: list, purchased: dict, attempts: dict, 
 # ─────────────────────────────────────────────
 
 
-def _auto_buy_sequential(non_app: list, purchased: dict, attempts: dict) -> dict:
-    """
-    Sequential 模式（預設）：帳號間平行，每帳號登入一次後逐件商品依序結帳。
-    節省登入次數，適合商品數量少的情境。
-    """
-    results = {}
-    if len(FUNBOX_ACCOUNTS) == 1:
-        email, pwd = FUNBOX_ACCOUNTS[0]
-        acct_products = _sort_products_for_account(non_app, purchased, attempts, email)
-        if acct_products:
-            results[email] = _checkout_for_account(email, pwd, acct_products)
-        else:
-            log.info(f"[{email}] 本輪無待購商品，跳過")
-    else:
-        with ThreadPoolExecutor(max_workers=len(FUNBOX_ACCOUNTS)) as executor:
-            futures = {}
-            for email, pwd in FUNBOX_ACCOUNTS:
-                acct_products = _sort_products_for_account(non_app, purchased, attempts, email)
-                if acct_products:
-                    futures[executor.submit(_checkout_for_account, email, pwd, acct_products)] = email
-                else:
-                    log.info(f"[{email}] 本輪無待購商品，跳過")
-            for future in as_completed(futures):
-                email = futures[future]
-                try:
-                    results[email] = future.result()
-                except Exception as e:
-                    log.error(f"[{email}] 執行緒例外：{e}")
-                    results[email] = {"added": [], "attempted": [], "checkout": {}}
-    return results
-
-
-def _auto_buy_parallel(non_app: list, purchased: dict, attempts: dict) -> dict:
-    """
-    Parallel 模式：帳號間平行，每帳號登入一次後逐件商品依序結帳。
-    並行單位為「帳號」，同帳號內商品排隊，避免同帳號購物車互撞或重複登入。
-    """
-    account_tasks = []
-    for email, pwd in FUNBOX_ACCOUNTS:
-        sorted_products = _sort_products_for_account(
-            non_app, purchased, attempts, email
-        )
-        if sorted_products:
-            account_tasks.append((email, pwd, sorted_products))
-
-    if not account_tasks:
-        log.info("平行模式：無待執行任務")
-        return {}
-
-    n_workers = min(PARALLEL_CHECKOUT_LIMIT, len(account_tasks))
-    log.info(
-        f"平行模式：{len(account_tasks)} 個帳號，並發上限 {n_workers}"
-    )
-
-    results: dict = {}
-
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {
-            executor.submit(
-                _checkout_for_account, email, pwd, products
-            ): email
-            for email, pwd, products in account_tasks
-        }
-        for future in as_completed(futures):
-            email = futures[future]
-            try:
-                results[email] = future.result()
-            except Exception as e:
-                log.error(f"[{email}] 執行緒例外：{e}")
-                results[email] = {
-                    "added": [],
-                    "attempted": [],
-                    "checkout": {},
-                }
-
-    return results
-
-
 def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
     """
-    對所有可購買商品，依 CHECKOUT_MODE 決定下單策略：
-      'sequential'：帳號平行，每帳號登入一次後逐件商品依序結帳（節省登入次數）
-      'parallel'  ：每個（帳號 × 商品）獨立 thread（最大化速度，各自獨立登入）
+    Thread 4（全域庫存監控）+ Thread 1~N（各帳號平行下單）策略：
+      - Thread 4 不登入 Funbox，純監控庫存 API
+      - 任一商品庫存 < STOCK_THRESHOLD 時，設定 shared_checkout_event
+      - 所有帳號 thread 收到信號後同步觸發整車結帳
 
     purchased: {href: {帳號email: 購買次數}} — 購買越少的商品越優先
     attempts:  {href: {帳號email: 連續失敗次數}} — 連續失敗 ≥10 次才跳過
@@ -864,11 +1002,64 @@ def auto_buy_all(products: list, purchased: dict, attempts: dict) -> dict:
         log.info(f"MAX_BUY_PRODUCTS={MAX_BUY_PRODUCTS}，僅購買前 {MAX_BUY_PRODUCTS} 件")
         non_app = non_app[:MAX_BUY_PRODUCTS]
 
-    log.info(f"自動購買啟動（{CHECKOUT_MODE} 模式）：{len(non_app)} 件商品 × {len(FUNBOX_ACCOUNTS)} 組帳號")
+    log.info(
+        f"自動購買啟動：{len(non_app)} 件商品 × {len(FUNBOX_ACCOUNTS)} 組帳號"
+        f"（Thread 4 全域監控 + Thread 1~{len(FUNBOX_ACCOUNTS)} 各帳號平行下單）"
+    )
 
-    if CHECKOUT_MODE == "parallel":
-        return _auto_buy_parallel(non_app, purchased, attempts)
-    return _auto_buy_sequential(non_app, purchased, attempts)
+    # ── 建立共用狀態（Thread 4 + 所有帳號 thread 共用）──
+    shared_checkout_event = threading.Event()
+    shared_stop_event     = threading.Event()
+    trigger_info: list        = []
+    new_products_found: list  = []
+    watch_hrefs: list         = [p["href"] for p in non_app]
+
+    # ── 啟動 Thread 4：全域庫存監控 ──
+    monitor_thread = threading.Thread(
+        target=_global_stock_monitor,
+        args=(
+            shared_stop_event,
+            shared_checkout_event,
+            watch_hrefs,
+            trigger_info,
+            new_products_found,
+        ),
+        daemon=True,
+        name="global-monitor",
+    )
+    monitor_thread.start()
+
+    # ── 啟動 Thread 1~N：各帳號平行下單 ──
+    results: dict = {}
+    n_workers = min(PARALLEL_CHECKOUT_LIMIT, len(FUNBOX_ACCOUNTS))
+
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures: dict = {}
+        for email, pwd in FUNBOX_ACCOUNTS:
+            acct_products = _sort_products_for_account(non_app, purchased, attempts, email)
+            if acct_products:
+                futures[executor.submit(
+                    _checkout_for_account,
+                    email, pwd, acct_products,
+                    shared_checkout_event, shared_stop_event,
+                    trigger_info, new_products_found,
+                )] = email
+            else:
+                log.info(f"[{email}] 本輪無待購商品，跳過")
+
+        for future in as_completed(futures):
+            email = futures[future]
+            try:
+                results[email] = future.result()
+            except Exception as e:
+                log.error(f"[{email}] 執行緒例外：{e}")
+                results[email] = {"added": [], "attempted": [], "checkout": {}}
+
+    # ── 停止 Thread 4（若帳號全部結帳完成仍在等待中）──
+    shared_stop_event.set()
+    monitor_thread.join(timeout=5)
+
+    return results
 
 
 # ─────────────────────────────────────────────

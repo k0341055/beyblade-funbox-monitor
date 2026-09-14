@@ -44,6 +44,7 @@ log = logging.getLogger(__name__)
 
 
 BUY_KEYWORDS: list[str] = [
+    "BX-53", "BX-52",
     "BX-09",
     "UX-17",
     "UX-21",
@@ -53,6 +54,7 @@ BUY_KEYWORDS: list[str] = [
     "CX-16",
     "CX-04",
     "UX-03",
+    "CX-00 迪",
     "CX-00 新世紀福音戰士",
     "BX-00 蒼龍神劍",
     "UX-16",
