@@ -1,4 +1,4 @@
-"""
+ """
 shop.funbox.com.tw 商品偵測器
 - 偵測：Cyberbiz /products.json API，每輪 < 1 秒
 - 下單：多帳號平行執行（Thread 1/2/3），積累式購物車 + 一次性整車結帳
@@ -540,16 +540,16 @@ def _checkout_for_account(
         log.error(f"[{email}] 登入例外：{e}")
         return {"added": [], "attempted": attempted, "checkout": {}}
 
-    # ── 清空購物車（只清一次，後續不逐件清空）──
-    t_clear = _time.perf_counter()
-    try:
-        r_clear = sess.post(f"{BASE_URL}/cart/clear.js", timeout=10)
-        log.info(
-            f"[{email}] ⏱ 購物車已清空"
-            f"（{_time.perf_counter()-t_clear:.2f}s，HTTP {r_clear.status_code}）"
-        )
-    except Exception as e:
-        log.warning(f"[{email}] 購物車清空失敗：{e}")
+    # # ── 清空購物車（只清一次，後續不逐件清空）──
+    # t_clear = _time.perf_counter()
+    # try:
+    #     r_clear = sess.post(f"{BASE_URL}/cart/clear.js", timeout=10)
+    #     log.info(
+    #         f"[{email}] ⏱ 購物車已清空"
+    #         f"（{_time.perf_counter()-t_clear:.2f}s，HTTP {r_clear.status_code}）"
+    #     )
+    # except Exception as e:
+    #     # log.warning(f"[{email}] 購物車清空失敗：{e}")
 
     # ── 一次性將所有商品加入購物車（不逐件清空）──
     cart_items: list = []   # 成功加入購物車的商品（共用給監控 thread）
