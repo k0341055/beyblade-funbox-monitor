@@ -1,4 +1,4 @@
- """
+"""
 shop.funbox.com.tw 商品偵測器
 - 偵測：Cyberbiz /products.json API，每輪 < 1 秒
 - 下單：多帳號平行執行（Thread 1/2/3），積累式購物車 + 一次性整車結帳
