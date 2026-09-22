@@ -2074,7 +2074,7 @@ class EsliteMonitorBase(ABC):
                     page
                 )
             )
-
+            products = [ p for p in products if p.get("status") == "add_to_shopping_cart"]
             now = datetime.now(
                 self.TW_TZ
             )
