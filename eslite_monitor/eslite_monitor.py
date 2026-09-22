@@ -2162,7 +2162,7 @@ class EsliteMonitorBase(ABC):
                     p
                     for p in products
                     if self._is_buy_whitelisted(p)
-                    and p.get("status")=="add_to_shopping_cart"
+                    
                 ]
 
                 blocked = (
