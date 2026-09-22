@@ -549,7 +549,7 @@ def _checkout_for_account(
     #         f"（{_time.perf_counter()-t_clear:.2f}s，HTTP {r_clear.status_code}）"
     #     )
     # except Exception as e:
-    #     # log.warning(f"[{email}] 購物車清空失敗：{e}")
+        # log.warning(f"[{email}] 購物車清空失敗：{e}")
 
     # ── 一次性將所有商品加入購物車（不逐件清空）──
     cart_items: list = []   # 成功加入購物車的商品（共用給監控 thread）
