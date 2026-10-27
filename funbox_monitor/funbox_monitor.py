@@ -102,6 +102,7 @@ _RETRY_LATER_WORDS = (
 # ── 完全靜默的商品關鍵字（不通知、不下單）──────────────
 SKIP_KEYWORDS: list[str] = [
     "APP",
+    "CX-19",
     "CX-16",
     "CX-00 新世紀福音",
     "BX-37"
@@ -136,7 +137,6 @@ BUY_KEYWORDS: list[str] = [
     "CX-07",
     "UX-01",
     "BX-35", "BX-48", "BX-49",
-    "CX-19",
     "BX-50", "BX-34",
     "CX-13", "CX-08", "CX-17", "CX-05",
     "BX-42", "BX-29", "BX-30",
